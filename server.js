@@ -246,6 +246,198 @@ app.post('/api/chatbot/gestores', (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════
+// EXPORTAR A EXCEL
+// ═══════════════════════════════════════════════════════════
+
+// Exportar interacciones a Excel
+app.get('/api/exportar/interacciones', (req, res) => {
+  try {
+    const interacciones = chatbot.getInteracciones(500);
+    
+    if (interacciones.length === 0) {
+      return res.status(404).json({ error: 'No hay interacciones para exportar' });
+    }
+    
+    // Formatear datos para Excel
+    const datos = interacciones.map(i => ({
+      'Fecha': new Date(i.timestamp).toLocaleDateString('es-MX'),
+      'Hora': new Date(i.timestamp).toLocaleTimeString('es-MX'),
+      'Teléfono': i.telefono,
+      'Tipo': i.tipo,
+      'Detalle': i.detalle
+    }));
+    
+    const ws = XLSX.utils.json_to_sheet(datos);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Interacciones');
+    
+    // Ajustar anchos de columna
+    ws['!cols'] = [
+      { wch: 12 }, // Fecha
+      { wch: 10 }, // Hora
+      { wch: 15 }, // Teléfono
+      { wch: 15 }, // Tipo
+      { wch: 50 }  // Detalle
+    ];
+    
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    
+    const fecha = new Date().toISOString().split('T')[0];
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename=Interacciones_${fecha}.xlsx`);
+    res.send(buffer);
+    
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Exportar conversaciones activas a Excel
+app.get('/api/exportar/conversaciones', (req, res) => {
+  try {
+    const conversaciones = chatbot.getConversaciones();
+    
+    if (conversaciones.length === 0) {
+      return res.status(404).json({ error: 'No hay conversaciones activas' });
+    }
+    
+    const datos = conversaciones.map(c => ({
+      'Teléfono': c.telefono,
+      'Estado': c.estado,
+      'Gestor Asignado': c.gestor?.nombre || 'N/A',
+      'Última Actividad': c.timestamp ? new Date(c.timestamp).toLocaleString('es-MX') : 'N/A'
+    }));
+    
+    const ws = XLSX.utils.json_to_sheet(datos);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Conversaciones');
+    
+    ws['!cols'] = [
+      { wch: 15 },
+      { wch: 20 },
+      { wch: 20 },
+      { wch: 20 }
+    ];
+    
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    
+    const fecha = new Date().toISOString().split('T')[0];
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename=Conversaciones_${fecha}.xlsx`);
+    res.send(buffer);
+    
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Exportar clientes cargados a Excel
+app.get('/api/exportar/clientes', (req, res) => {
+  try {
+    const clientes = [...chatbot.clientes.values()];
+    
+    if (clientes.length === 0) {
+      return res.status(404).json({ error: 'No hay clientes cargados' });
+    }
+    
+    const datos = clientes.map(c => ({
+      'Nombre': c.nombre || 'N/A',
+      'Teléfono': c.telefono || 'N/A',
+      'Saldo': c.saldo || 0,
+      'Días Atraso': c.diasAtraso || 0
+    }));
+    
+    const ws = XLSX.utils.json_to_sheet(datos);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Clientes');
+    
+    ws['!cols'] = [
+      { wch: 30 },
+      { wch: 15 },
+      { wch: 12 },
+      { wch: 12 }
+    ];
+    
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    
+    const fecha = new Date().toISOString().split('T')[0];
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename=Clientes_Bot_${fecha}.xlsx`);
+    res.send(buffer);
+    
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Reporte completo (interacciones + resumen)
+app.get('/api/exportar/reporte', (req, res) => {
+  try {
+    const wb = XLSX.utils.book_new();
+    const fecha = new Date().toISOString().split('T')[0];
+    
+    // Hoja 1: Resumen
+    const stats = chatbot.getEstadisticas();
+    const resumen = [
+      { 'Métrica': 'Clientes Registrados', 'Valor': stats.clientesRegistrados },
+      { 'Métrica': 'Conversaciones Activas', 'Valor': stats.conversacionesActivas },
+      { 'Métrica': 'Interacciones Hoy', 'Valor': stats.interaccionesHoy },
+      { 'Métrica': 'ChatBot Activo', 'Valor': stats.activo ? 'Sí' : 'No' },
+      { 'Métrica': 'Fecha Reporte', 'Valor': new Date().toLocaleString('es-MX') }
+    ];
+    const wsResumen = XLSX.utils.json_to_sheet(resumen);
+    wsResumen['!cols'] = [{ wch: 25 }, { wch: 20 }];
+    XLSX.utils.book_append_sheet(wb, wsResumen, 'Resumen');
+    
+    // Hoja 2: Interacciones
+    const interacciones = chatbot.getInteracciones(500).map(i => ({
+      'Fecha': new Date(i.timestamp).toLocaleDateString('es-MX'),
+      'Hora': new Date(i.timestamp).toLocaleTimeString('es-MX'),
+      'Teléfono': i.telefono,
+      'Tipo': i.tipo,
+      'Detalle': i.detalle
+    }));
+    if (interacciones.length > 0) {
+      const wsInter = XLSX.utils.json_to_sheet(interacciones);
+      wsInter['!cols'] = [{ wch: 12 }, { wch: 10 }, { wch: 15 }, { wch: 15 }, { wch: 50 }];
+      XLSX.utils.book_append_sheet(wb, wsInter, 'Interacciones');
+    }
+    
+    // Hoja 3: Conversaciones
+    const conversaciones = chatbot.getConversaciones().map(c => ({
+      'Teléfono': c.telefono,
+      'Estado': c.estado,
+      'Gestor': c.gestor?.nombre || 'N/A',
+      'Última Actividad': c.timestamp ? new Date(c.timestamp).toLocaleString('es-MX') : 'N/A'
+    }));
+    if (conversaciones.length > 0) {
+      const wsConv = XLSX.utils.json_to_sheet(conversaciones);
+      wsConv['!cols'] = [{ wch: 15 }, { wch: 20 }, { wch: 20 }, { wch: 20 }];
+      XLSX.utils.book_append_sheet(wb, wsConv, 'Conversaciones');
+    }
+    
+    // Hoja 4: Gestores
+    const gestores = stats.gestores.map(g => ({
+      'Nombre': g.nombre,
+      'Teléfono': g.telefono,
+      'Activo': g.activo ? 'Sí' : 'No'
+    }));
+    const wsGest = XLSX.utils.json_to_sheet(gestores);
+    wsGest['!cols'] = [{ wch: 20 }, { wch: 15 }, { wch: 10 }];
+    XLSX.utils.book_append_sheet(wb, wsGest, 'Gestores');
+    
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename=Reporte_ChatBot_${fecha}.xlsx`);
+    res.send(buffer);
+    
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════
 // HEALTH CHECK (para Render/UptimeRobot)
 // ═══════════════════════════════════════════════════════════
 
@@ -322,6 +514,16 @@ app.get('/', (req, res) => {
         <div class="stat"><h3 id="sConv">0</h3><p>Conversaciones</p></div>
         <div class="stat"><h3 id="sInter">0</h3><p>Interacciones Hoy</p></div>
         <div class="stat"><h3 id="sBot">-</h3><p>ChatBot</p></div>
+      </div>
+    </div>
+    
+    <div class="card">
+      <h2>📥 Exportar a Excel</h2>
+      <div style="text-align:center;">
+        <button class="btn btn-success" onclick="window.location.href='/api/exportar/reporte'">📊 Reporte Completo</button>
+        <button class="btn btn-primary" onclick="window.location.href='/api/exportar/interacciones'">💬 Interacciones</button>
+        <button class="btn btn-primary" onclick="window.location.href='/api/exportar/conversaciones'">🗂️ Conversaciones</button>
+        <button class="btn btn-primary" onclick="window.location.href='/api/exportar/clientes'">👥 Clientes</button>
       </div>
     </div>
     
