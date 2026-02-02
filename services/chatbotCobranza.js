@@ -304,7 +304,18 @@ O escriba *HOLA*`;
   // ═══════════════════════════════════════
 
   extraerTelefono(jid) {
-    return jid.replace('@s.whatsapp.net', '').replace('52', '');
+    // Limpiar el JID para obtener solo el número
+    let telefono = jid
+      .replace('@s.whatsapp.net', '')
+      .replace('@lid', '')
+      .replace('52', '');
+    
+    // Si es un ID interno largo, intentar extraer los últimos 10 dígitos
+    if (telefono.length > 10) {
+      telefono = telefono.slice(-10);
+    }
+    
+    return telefono;
   }
 
   extraerTexto(msg) {
