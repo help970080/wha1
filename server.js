@@ -528,6 +528,16 @@ app.get('/', (req, res) => {
     </div>
     
     <div class="card">
+      <h2>📤 Cargar Cartera de Clientes</h2>
+      <p style="color:#666; margin-bottom:15px;">Sube un Excel con columnas: Cliente, Teléfono, Saldo, Días Atraso</p>
+      <div style="text-align:center;">
+        <input type="file" id="archivoExcel" accept=".xlsx,.xls" style="display:none;" onchange="subirCartera(this)">
+        <button class="btn btn-success" onclick="document.getElementById('archivoExcel').click()">📂 Seleccionar Excel</button>
+      </div>
+      <div id="resultadoCarga" style="margin-top:15px; text-align:center;"></div>
+    </div>
+    
+    <div class="card">
       <h2>👥 Gestores</h2>
       <div class="gestores" id="gestores"></div>
     </div>
@@ -601,6 +611,36 @@ app.get('/', (req, res) => {
     async function desconectar() {
       await fetch('/api/desconectar', { method: 'POST' });
       cargarEstado();
+    }
+    
+    async function subirCartera(input) {
+      const file = input.files[0];
+      if (!file) return;
+      
+      const resultado = document.getElementById('resultadoCarga');
+      resultado.innerHTML = '<p style="color:#856404;">⏳ Cargando...</p>';
+      
+      const formData = new FormData();
+      formData.append('archivo', file);
+      
+      try {
+        const res = await fetch('/api/subir-excel', {
+          method: 'POST',
+          body: formData
+        });
+        const data = await res.json();
+        
+        if (data.exito) {
+          resultado.innerHTML = '<p style="color:#155724;">✅ ' + data.totalRegistros + ' clientes cargados correctamente</p>';
+          cargarEstado();
+        } else {
+          resultado.innerHTML = '<p style="color:#721c24;">❌ Error: ' + data.mensaje + '</p>';
+        }
+      } catch (e) {
+        resultado.innerHTML = '<p style="color:#721c24;">❌ Error: ' + e.message + '</p>';
+      }
+      
+      input.value = '';
     }
     
     cargarEstado();
