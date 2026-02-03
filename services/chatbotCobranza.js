@@ -58,24 +58,56 @@ class ChatBotCobranza {
   async procesarMensaje(msg) {
     try {
       const jid = msg.key.remoteJid;
+      
+      // ═══════════════════════════════════════
+      // FILTROS - Ignorar mensajes no deseados
+      // ═══════════════════════════════════════
+      
+      // Ignorar si no hay JID
+      if (!jid) return;
+      
+      // Ignorar grupos
+      if (jid.includes('@g.us')) return;
+      
+      // Ignorar broadcasts y listas de difusión
+      if (jid.includes('@broadcast') || jid === 'status@broadcast') return;
+      
+      // Ignorar estados de WhatsApp
+      if (jid === 'status@broadcast' || jid.includes('status')) return;
+      
+      // Ignorar mensajes del propio bot
+      if (msg.key.fromMe) return;
+      
+      // Ignorar si es un mensaje de notificación del sistema
+      if (msg.message?.protocolMessage) return;
+      if (msg.message?.reactionMessage) return;
+      
+      // ═══════════════════════════════════════
+      
       const telefono = this.extraerTelefono(jid);
       const texto = this.extraerTexto(msg);
       
+      // Solo procesar si es un chat individual válido
+      if (!jid.includes('@s.whatsapp.net') && !jid.includes('@lid')) {
+        return;
+      }
+      
       if (!texto) {
-        if (msg.message?.imageMessage) {
+        // Solo procesar imágenes de chats individuales, no de estados
+        if (msg.message?.imageMessage && jid.includes('@s.whatsapp.net')) {
           await this.manejarImagen(jid, telefono);
         }
         return;
       }
       
       console.log(`📨 [${telefono}] ${texto.substring(0, 50)}`);
-      this.registrarInteraccion(telefono, 'recibido', texto);
+      this.registrarInteraccion(telefono, 'recibido', texto, jid);
       
       const respuesta = this.generarRespuesta(telefono, texto);
       
       if (respuesta) {
         await this.whatsapp.sock.sendMessage(jid, { text: respuesta });
-        this.registrarInteraccion(telefono, 'enviado', respuesta.substring(0, 50));
+        this.registrarInteraccion(telefono, 'enviado', respuesta.substring(0, 50), jid);
       }
     } catch (error) {
       console.error('❌ Error en chatbot:', error.message);
@@ -304,17 +336,35 @@ O escriba *HOLA*`;
   // ═══════════════════════════════════════
 
   extraerTelefono(jid) {
-    // Limpiar el JID para obtener solo el número
+    // Limpiar el JID para obtener el número
     let telefono = jid
       .replace('@s.whatsapp.net', '')
-      .replace('@lid', '')
-      .replace('52', '');
+      .replace('@lid', '');
     
-    // Si es un ID interno largo, intentar extraer los últimos 10 dígitos
-    if (telefono.length > 10) {
-      telefono = telefono.slice(-10);
+    // Si empieza con 52 (México), quitar el prefijo
+    if (telefono.startsWith('52') && telefono.length === 12) {
+      telefono = telefono.substring(2);
     }
     
+    // Si el número tiene más de 10 dígitos, es un ID interno
+    // Guardamos el ID completo para poder responder
+    if (telefono.length > 12) {
+      // Es un ID interno de WhatsApp, guardar completo
+      return telefono;
+    }
+    
+    return telefono;
+  }
+
+  // Función para formatear teléfono para mostrar
+  formatearTelefonoDisplay(telefono) {
+    if (telefono.length === 10) {
+      return telefono.replace(/(\d{2})(\d{4})(\d{4})/, '$1-$2-$3');
+    }
+    // Si es ID largo, mostrar solo últimos 10 dígitos
+    if (telefono.length > 10) {
+      return '...' + telefono.slice(-10);
+    }
     return telefono;
   }
 
@@ -341,8 +391,14 @@ O escriba *HOLA*`;
     this.conversaciones.set(telefono, { estado, ...datos, timestamp: Date.now() });
   }
 
-  registrarInteraccion(telefono, tipo, detalle) {
-    this.interacciones.push({ telefono, tipo, detalle, timestamp: new Date().toISOString() });
+  registrarInteraccion(telefono, tipo, detalle, jidOriginal = null) {
+    this.interacciones.push({ 
+      telefono, 
+      jid: jidOriginal,
+      tipo, 
+      detalle, 
+      timestamp: new Date().toISOString() 
+    });
     if (this.interacciones.length > 500) this.interacciones = this.interacciones.slice(-250);
   }
 
