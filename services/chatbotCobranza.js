@@ -14,7 +14,7 @@ class ChatBotCobranza {
     // Gestores configurados
     this.gestores = [
       { nombre: 'Lic. Alfonso', telefono: '5564304984', activo: true },
-      { nombre: 'Lic. Gisella', telefono: '5526889735', activo: true }
+      { nombre: 'Lic. Gisella', telefono: '5548049622', activo: true }
     ];
     this.gestorActual = 0;
     
