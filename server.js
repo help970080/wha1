@@ -11,8 +11,8 @@
  * - API REST completa
  * 
  * Gestores:
- * - Lic. Alfonso: 5564304984
- * - Lic. Gisella: 5548049622
+ * - Lic. Juan Carlos: 7352538215
+ * - Lic. Gustavo: 7351636757
  */
 
 require('dotenv').config();
