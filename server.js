@@ -11,8 +11,8 @@
  * - API REST completa
  * 
  * Gestores:
- * - Lic. Juan Carlos: 7352538215
- * - Lic. Gustavo: 7351636757
+ * - Lic. Carlos: 7352588215
+ * - Lic. Gustavo: 5548039744
  */
 
 require('dotenv').config();
@@ -663,7 +663,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('═══════════════════════════════════════════════════════════');
   console.log(`📡 Servidor: http://localhost:${PORT}`);
   console.log('🤖 ChatBot: Esperando conexión WhatsApp...');
-  console.log('👥 Gestores: Lic. Alfonso, Lic. Gisella');
+  console.log('👥 Gestores: Lic. Carlos, Lic. Gustavo');
   console.log('═══════════════════════════════════════════════════════════\n');
 });
 
