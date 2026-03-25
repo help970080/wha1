@@ -230,6 +230,21 @@ app.post('/api/campana/reset', (req, res) => {
   res.json({ exito: true, mensaje: 'Reset completo' });
 });
 
+// Limpiar cache de clientes (borrar JSON viejo)
+app.post('/api/chatbot/limpiar', (req, res) => {
+  try {
+    const fs = require('fs');
+    if (fs.existsSync('chatbot_clientes.json')) {
+      fs.unlinkSync('chatbot_clientes.json');
+    }
+    chatbot.clientes.clear();
+    chatbot.conversaciones.clear();
+    res.json({ exito: true, mensaje: 'Cache limpiado. Sube el Excel de nuevo.' });
+  } catch (e) {
+    res.status(500).json({ exito: false, mensaje: e.message });
+  }
+});
+
 // Progreso en tiempo real
 app.get('/api/campana/progreso', (req, res) => {
   res.json(envioMasivoService.getProgreso());
