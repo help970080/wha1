@@ -215,6 +215,12 @@ app.post('/api/campana/cancelar', (req, res) => {
   res.json({ exito: ok, mensaje: ok ? 'Campaña cancelada' : 'No hay campaña activa' });
 });
 
+// Force reset (cuando se traba)
+app.post('/api/campana/reset', (req, res) => {
+  envioMasivoService.forceReset();
+  res.json({ exito: true, mensaje: 'Reset completo' });
+});
+
 // Progreso en tiempo real
 app.get('/api/campana/progreso', (req, res) => {
   res.json(envioMasivoService.getProgreso());
@@ -747,7 +753,7 @@ function getPanelHTML() {
         <div style="margin-bottom:10px;">
           <label>Mensaje (plantilla)</label>
           <textarea id="campPlantilla" rows="4" placeholder="Hola {nombre}, le recordamos su adeudo de {saldo}..."></textarea>
-          <div class="vars-help">Variables: <code>{nombre}</code> <code>{saldo}</code> <code>{dias}</code> <code>{telefono}</code></div>
+          <div class="vars-help">Variables (click para insertar): <code onclick="insertVar('{nombre}')" style="cursor:pointer">{nombre}</code> <code onclick="insertVar('{saldo}')" style="cursor:pointer">{saldo}</code> <code onclick="insertVar('{dias}')" style="cursor:pointer">{dias}</code> <code onclick="insertVar('{telefono}')" style="cursor:pointer">{telefono}</code></div>
         </div>
         <div style="margin-bottom:10px;">
           <label>Imagen estándar (opcional)</label>
@@ -763,6 +769,7 @@ function getPanelHTML() {
           <button class="btn btn-green" id="btnIniciar" onclick="iniciarCampana()" disabled>▶ Iniciar</button>
           <button class="btn btn-yellow btn-sm" id="btnPausar" onclick="pausarCampana()" disabled>⏸ Pausar</button>
           <button class="btn btn-red btn-sm" id="btnCancelar" onclick="cancelarCampana()" disabled>✕ Cancelar</button>
+          <button class="btn btn-outline btn-sm" onclick="resetCampana()" title="Forzar reset si se traba">🔧 Reset</button>
         </div>
         <div id="progresoArea" class="hidden" style="margin-top:14px;">
           <div style="display:flex; justify-content:space-between; font-size:0.82rem;">
@@ -1176,6 +1183,20 @@ async function cancelarCampana() {
   if (!confirm('¿Cancelar envío?')) return;
   await fetch('/api/campana/cancelar',{method:'POST'});
   cargarEstado();
+}
+async function resetCampana() {
+  if (!confirm('¿Forzar reset? Esto detiene todo y limpia la cola.')) return;
+  await fetch('/api/campana/reset',{method:'POST'});
+  cargarEstado();
+}
+function insertVar(v) {
+  const ta = document.getElementById('campPlantilla');
+  const start = ta.selectionStart;
+  const end = ta.selectionEnd;
+  const text = ta.value;
+  ta.value = text.substring(0, start) + v + text.substring(end);
+  ta.selectionStart = ta.selectionEnd = start + v.length;
+  ta.focus();
 }
 
 // ═══════════════════════════════════
