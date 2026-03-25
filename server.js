@@ -230,6 +230,26 @@ app.get('/api/campana/estadisticas', (req, res) => {
   res.json(envioMasivoService.getEstadisticas());
 });
 
+// Log en tiempo real del envío masivo
+app.get('/api/campana/logs', (req, res) => {
+  const limite = parseInt(req.query.limite) || 50;
+  res.json(envioMasivoService.getLogs(limite));
+});
+
+// Conversación completa de un teléfono (ida y vuelta)
+app.get('/api/conversacion/:telefono', (req, res) => {
+  const tel = req.params.telefono;
+  const interacciones = chatbot.getInteracciones(100, tel);
+  const cliente = chatbot.obtenerCliente(tel);
+  const conv = chatbot.obtenerConversacion(tel);
+  res.json({
+    cliente,
+    estado: conv.estado || 'sin_conversacion',
+    gestor: conv.gestor || null,
+    mensajes: interacciones,
+  });
+});
+
 // Actualizar configuración de delays
 app.post('/api/campana/config', (req, res) => {
   const config = envioMasivoService.actualizarConfig(req.body);
@@ -551,7 +571,6 @@ function getPanelHTML() {
       --text: #E2E8F0;
       --muted: #8896A6;
       --accent: #3B82F6;
-      --accent2: #2563EB;
       --green: #10B981;
       --green-bg: rgba(16,185,129,0.12);
       --red: #EF4444;
@@ -570,15 +589,15 @@ function getPanelHTML() {
     .conn-badge.on { background:var(--green-bg); color:var(--green); }
     .conn-badge.off { background:var(--red-bg); color:var(--red); }
     
-    .container { max-width:1100px; margin:0 auto; padding:20px; }
-    
+    .container { max-width:1200px; margin:0 auto; padding:20px; }
     .grid { display:grid; gap:16px; }
     .grid-2 { grid-template-columns:1fr 1fr; }
+    .grid-3 { grid-template-columns:1fr 1fr 1fr; }
     .grid-4 { grid-template-columns:repeat(4,1fr); }
-    @media(max-width:768px) { .grid-2,.grid-4 { grid-template-columns:1fr; } }
+    @media(max-width:900px) { .grid-2,.grid-3,.grid-4 { grid-template-columns:1fr; } }
     
     .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:20px; }
-    .card h2 { font-size:0.85rem; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:14px; }
+    .card h2 { font-size:0.85rem; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:14px; display:flex; align-items:center; gap:8px; }
     
     .stat-card { text-align:center; }
     .stat-card .num { font-size:2rem; font-weight:700; font-family:'JetBrains Mono',monospace; }
@@ -607,56 +626,83 @@ function getPanelHTML() {
       border-radius:8px; color:var(--text); font-family:inherit; font-size:0.85rem; resize:vertical;
     }
     textarea:focus, input:focus, select:focus { outline:none; border-color:var(--accent); }
-    
     label { font-size:0.8rem; font-weight:500; color:var(--muted); margin-bottom:6px; display:block; }
     
-    .file-drop { border:2px dashed var(--border); border-radius:12px; padding:30px; text-align:center; cursor:pointer; transition:all 0.2s; }
+    .file-drop { border:2px dashed var(--border); border-radius:12px; padding:24px; text-align:center; cursor:pointer; transition:all 0.2s; }
     .file-drop:hover { border-color:var(--accent); background:rgba(59,130,246,0.05); }
     .file-drop.active { border-color:var(--green); background:rgba(16,185,129,0.05); }
-    .file-drop p { color:var(--muted); font-size:0.85rem; margin-top:8px; }
+    .file-drop p { color:var(--muted); font-size:0.82rem; margin-top:6px; }
     
-    .log-panel { background:var(--bg); border-radius:8px; padding:12px; max-height:220px; overflow-y:auto; font-family:'JetBrains Mono',monospace; font-size:0.75rem; }
-    .log-line { padding:4px 0; border-bottom:1px solid rgba(255,255,255,0.04); display:flex; gap:8px; }
-    .log-time { color:var(--muted); min-width:65px; }
+    .log-panel { background:var(--bg); border-radius:8px; padding:12px; max-height:280px; overflow-y:auto; font-family:'JetBrains Mono',monospace; font-size:0.73rem; }
+    .log-line { padding:5px 0; border-bottom:1px solid rgba(255,255,255,0.04); display:flex; gap:8px; align-items:flex-start; }
+    .log-time { color:var(--muted); min-width:55px; flex-shrink:0; }
     .log-ok { color:var(--green); }
     .log-err { color:var(--red); }
     .log-info { color:var(--accent); }
+    .log-tag { display:inline-block; padding:1px 6px; border-radius:3px; font-size:0.65rem; font-weight:600; margin-right:4px; }
+    .log-tag.ok { background:var(--green-bg); color:var(--green); }
+    .log-tag.err { background:var(--red-bg); color:var(--red); }
+    .log-tag.in { background:rgba(59,130,246,0.15); color:var(--accent); }
+    .log-tag.out { background:rgba(139,92,246,0.15); color:var(--purple); }
     
     .tag { display:inline-block; padding:3px 8px; border-radius:4px; font-size:0.7rem; font-weight:600; }
     .tag-ok { background:var(--green-bg); color:var(--green); }
     .tag-err { background:var(--red-bg); color:var(--red); }
     .tag-wait { background:var(--yellow-bg); color:var(--yellow); }
+    .tag-info { background:rgba(59,130,246,0.12); color:var(--accent); }
     
     .controls { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
-    
     .gestor-row { display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background:var(--bg); border-radius:8px; margin-bottom:6px; }
-    
     .vars-help { background:var(--bg); border-radius:8px; padding:10px 14px; font-size:0.78rem; color:var(--muted); margin-top:8px; }
     .vars-help code { background:var(--card); padding:2px 6px; border-radius:4px; color:var(--accent); font-family:'JetBrains Mono',monospace; }
-    
-    .section-title { font-size:1rem; font-weight:700; margin:24px 0 12px; display:flex; align-items:center; gap:8px; }
-    
     .hidden { display:none !important; }
-    
     #qrArea img { max-width:220px; border-radius:8px; margin:12px auto; display:block; }
     
-    .preview-table { width:100%; font-size:0.78rem; border-collapse:collapse; margin-top:10px; }
-    .preview-table th { text-align:left; padding:6px 8px; color:var(--muted); border-bottom:1px solid var(--border); font-weight:600; }
-    .preview-table td { padding:6px 8px; border-bottom:1px solid rgba(255,255,255,0.03); }
+    .preview-table { width:100%; font-size:0.75rem; border-collapse:collapse; margin-top:10px; }
+    .preview-table th { text-align:left; padding:5px 8px; color:var(--muted); border-bottom:1px solid var(--border); font-weight:600; }
+    .preview-table td { padding:5px 8px; border-bottom:1px solid rgba(255,255,255,0.03); }
+    
+    /* Tabs */
+    .tabs { display:flex; gap:0; border-bottom:1px solid var(--border); margin-bottom:14px; }
+    .tab { padding:10px 18px; cursor:pointer; font-size:0.82rem; font-weight:500; color:var(--muted); border-bottom:2px solid transparent; transition:all 0.15s; }
+    .tab:hover { color:var(--text); }
+    .tab.active { color:var(--accent); border-bottom-color:var(--accent); }
+    .tab-content { display:none; }
+    .tab-content.active { display:block; }
+    
+    /* Conversation viewer */
+    .conv-list { max-height:300px; overflow-y:auto; }
+    .conv-item { padding:10px 12px; background:var(--bg); border-radius:8px; margin-bottom:6px; cursor:pointer; transition:all 0.15s; display:flex; justify-content:space-between; align-items:center; }
+    .conv-item:hover { background:rgba(59,130,246,0.08); border:1px solid var(--accent); margin:-1px; padding:9px 11px; }
+    .conv-name { font-weight:600; font-size:0.85rem; }
+    .conv-tel { color:var(--muted); font-size:0.75rem; font-family:'JetBrains Mono',monospace; }
+    
+    .chat-view { background:var(--bg); border-radius:8px; padding:14px; max-height:350px; overflow-y:auto; }
+    .chat-msg { margin-bottom:10px; max-width:85%; }
+    .chat-msg.sent { margin-left:auto; }
+    .chat-msg .bubble { padding:10px 14px; border-radius:12px; font-size:0.82rem; line-height:1.4; }
+    .chat-msg.received .bubble { background:var(--card); border:1px solid var(--border); border-bottom-left-radius:4px; }
+    .chat-msg.sent .bubble { background:rgba(59,130,246,0.2); border:1px solid rgba(59,130,246,0.3); border-bottom-right-radius:4px; }
+    .chat-msg .meta { font-size:0.65rem; color:var(--muted); margin-top:3px; padding:0 4px; }
+    .chat-msg.sent .meta { text-align:right; }
+    
+    /* Queue table */
+    .queue-table { width:100%; font-size:0.75rem; border-collapse:collapse; }
+    .queue-table th { text-align:left; padding:8px; color:var(--muted); border-bottom:1px solid var(--border); font-weight:600; position:sticky; top:0; background:var(--card); }
+    .queue-table td { padding:6px 8px; border-bottom:1px solid rgba(255,255,255,0.03); }
+    .queue-scroll { max-height:350px; overflow-y:auto; }
   </style>
 </head>
 <body>
 
 <div class="header">
   <h1>📡 <span>CelExpress</span> WhatsApp Bot</h1>
-  <div>
-    <span class="conn-badge off" id="connBadge">● Desconectado</span>
-  </div>
+  <span class="conn-badge off" id="connBadge">● Desconectado</span>
 </div>
 
 <div class="container">
 
-  <!-- Stats -->
+  <!-- Stats row -->
   <div class="grid grid-4" style="margin-bottom:16px;">
     <div class="card stat-card"><div class="num green" id="sEnviados">0</div><div class="label">Enviados hoy</div></div>
     <div class="card stat-card"><div class="num blue" id="sClientes">0</div><div class="label">Clientes cargados</div></div>
@@ -666,7 +712,7 @@ function getPanelHTML() {
 
   <div class="grid grid-2">
     
-    <!-- COLUMNA IZQUIERDA -->
+    <!-- ═══ COLUMNA IZQUIERDA ═══ -->
     <div>
       <!-- Conexión -->
       <div class="card" style="margin-bottom:16px;">
@@ -681,95 +727,109 @@ function getPanelHTML() {
       
       <!-- Cargar Excel -->
       <div class="card" style="margin-bottom:16px;">
-        <h2>📂 Cargar Cartera (Excel/CSV)</h2>
+        <h2>📂 Cargar Cartera</h2>
         <div class="file-drop" id="fileDrop" onclick="document.getElementById('fileInput').click()">
-          <div style="font-size:1.5rem;">📄</div>
-          <p>Click o arrastra tu archivo aquí</p>
-          <p style="font-size:0.72rem;">Columnas: Cliente/nombre, Teléfono/telefono, Saldo/saldo, Días Atraso/diasAtraso</p>
+          <div style="font-size:1.3rem;">📄</div>
+          <p>Click o arrastra tu Excel/CSV</p>
+          <p style="font-size:0.7rem;">Columnas: Cliente, Teléfono, Saldo, Días Atraso</p>
         </div>
         <input type="file" id="fileInput" accept=".xlsx,.xls,.csv" style="display:none" onchange="subirArchivo(this)">
         <div id="fileResult" class="hidden" style="margin-top:12px;"></div>
       </div>
       
-      <!-- Gestores -->
-      <div class="card">
-        <h2>👥 Gestores</h2>
-        <div id="gestoresArea"></div>
-      </div>
-    </div>
-    
-    <!-- COLUMNA DERECHA -->
-    <div>
-      <!-- Campaña Masiva -->
+      <!-- Campaña -->
       <div class="card" style="margin-bottom:16px;">
-        <h2>📤 Campaña de Envío Masivo</h2>
-        
-        <div style="margin-bottom:12px;">
-          <label>Nombre de campaña</label>
-          <input type="text" id="campNombre" placeholder="Ej: Cobranza Marzo 2026">
+        <h2>📤 Campaña Masiva</h2>
+        <div style="margin-bottom:10px;">
+          <label>Nombre</label>
+          <input type="text" id="campNombre" placeholder="Cobranza Marzo 2026">
         </div>
-        
-        <div style="margin-bottom:12px;">
+        <div style="margin-bottom:10px;">
           <label>Mensaje (plantilla)</label>
-          <textarea id="campPlantilla" rows="5" placeholder="Ej: Hola {nombre}, le recordamos su adeudo de {saldo} con {dias} días de atraso..."></textarea>
-          <div class="vars-help">
-            Variables: <code>{nombre}</code> <code>{saldo}</code> <code>{dias}</code> <code>{telefono}</code>
-          </div>
+          <textarea id="campPlantilla" rows="4" placeholder="Hola {nombre}, le recordamos su adeudo de {saldo}..."></textarea>
+          <div class="vars-help">Variables: <code>{nombre}</code> <code>{saldo}</code> <code>{dias}</code> <code>{telefono}</code></div>
         </div>
-        
-        <div style="margin-bottom:12px;">
+        <div style="margin-bottom:10px;">
           <label>Imagen estándar (opcional)</label>
           <input type="file" id="campImagen" accept="image/*">
         </div>
-        
-        <div class="grid grid-2" style="margin-bottom:12px; gap:8px;">
-          <div>
-            <label>Delay mín (seg)</label>
-            <input type="number" id="cfgDelayMin" value="25" min="10">
-          </div>
-          <div>
-            <label>Delay máx (seg)</label>
-            <input type="number" id="cfgDelayMax" value="90" min="20">
-          </div>
-          <div>
-            <label>Lote (msgs)</label>
-            <input type="number" id="cfgLote" value="8" min="3" max="15">
-          </div>
-          <div>
-            <label>Límite diario</label>
-            <input type="number" id="cfgLimite" value="45" min="10">
-          </div>
+        <div class="grid grid-4" style="gap:6px; margin-bottom:10px;">
+          <div><label>Delay mín (s)</label><input type="number" id="cfgDelayMin" value="25" min="10"></div>
+          <div><label>Delay máx (s)</label><input type="number" id="cfgDelayMax" value="90" min="20"></div>
+          <div><label>Lote</label><input type="number" id="cfgLote" value="8" min="3" max="15"></div>
+          <div><label>Lím. diario</label><input type="number" id="cfgLimite" value="45" min="10"></div>
         </div>
-        
         <div class="controls">
-          <button class="btn btn-green" id="btnIniciar" onclick="iniciarCampana()" disabled>▶ Iniciar Envío</button>
-          <button class="btn btn-yellow" id="btnPausar" onclick="pausarCampana()" disabled>⏸ Pausar</button>
+          <button class="btn btn-green" id="btnIniciar" onclick="iniciarCampana()" disabled>▶ Iniciar</button>
+          <button class="btn btn-yellow btn-sm" id="btnPausar" onclick="pausarCampana()" disabled>⏸ Pausar</button>
           <button class="btn btn-red btn-sm" id="btnCancelar" onclick="cancelarCampana()" disabled>✕ Cancelar</button>
         </div>
-        
-        <!-- Progreso -->
-        <div id="progresoArea" class="hidden" style="margin-top:16px;">
+        <div id="progresoArea" class="hidden" style="margin-top:14px;">
           <div style="display:flex; justify-content:space-between; font-size:0.82rem;">
-            <span id="progTexto">0/0 enviados</span>
+            <span id="progTexto">0/0</span>
             <span id="progPct" style="font-weight:700; color:var(--accent);">0%</span>
           </div>
           <div class="progress-bar"><div class="progress-fill" id="progBar" style="width:0%"></div></div>
           <div style="display:flex; justify-content:space-between; font-size:0.72rem; color:var(--muted);">
-            <span>⏱ Estimado: <span id="progETA">—</span></span>
-            <span>❌ Fallidos: <span id="progFail" style="color:var(--red);">0</span></span>
+            <span>⏱ <span id="progETA">—</span></span>
+            <span>❌ <span id="progFail" style="color:var(--red);">0</span></span>
           </div>
         </div>
       </div>
-      
-      <!-- Log de actividad -->
+
+      <!-- Gestores -->
       <div class="card">
-        <h2>📋 Actividad Reciente</h2>
-        <div class="log-panel" id="logPanel">
-          <div class="log-line"><span class="log-info">Esperando actividad...</span></div>
-        </div>
+        <h2>👥 Gestores</h2>
+        <div id="gestoresArea"></div>
         <div class="controls" style="margin-top:8px;">
-          <button class="btn btn-outline btn-sm" onclick="location.href='/api/exportar/reporte'">📊 Exportar Reporte</button>
-          <button class="btn btn-outline btn-sm" onclick="location.href='/api/exportar/interacciones'">💬 Exportar Chat</button>
+          <button class="btn btn-outline btn-sm" onclick="location.href='/api/exportar/reporte'">📊 Reporte Excel</button>
+        </div>
+      </div>
+    </div>
+    
+    <!-- ═══ COLUMNA DERECHA — MONITOREO ═══ -->
+    <div>
+      <div class="card" style="min-height:600px;">
+        <div class="tabs">
+          <div class="tab active" onclick="switchTab('tabLive')">📡 Envío en Vivo</div>
+          <div class="tab" onclick="switchTab('tabConv')">💬 Conversaciones</div>
+          <div class="tab" onclick="switchTab('tabCola')">📋 Cola / Detalle</div>
+        </div>
+        
+        <!-- TAB 1: Log en vivo -->
+        <div class="tab-content active" id="tabLive">
+          <div class="log-panel" id="liveLog" style="max-height:520px;">
+            <div class="log-line"><span class="log-info">Esperando actividad...</span></div>
+          </div>
+        </div>
+        
+        <!-- TAB 2: Conversaciones -->
+        <div class="tab-content" id="tabConv">
+          <div id="convListView">
+            <p style="font-size:0.8rem; color:var(--muted); margin-bottom:10px;">Clientes que han respondido:</p>
+            <div class="conv-list" id="convList"></div>
+          </div>
+          <div id="convChatView" class="hidden">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+              <div>
+                <span class="conv-name" id="chatNombre">—</span>
+                <span class="conv-tel" id="chatTel" style="margin-left:8px;">—</span>
+                <span class="tag tag-info" id="chatEstado" style="margin-left:8px;">—</span>
+              </div>
+              <button class="btn btn-outline btn-sm" onclick="cerrarChat()">← Volver</button>
+            </div>
+            <div class="chat-view" id="chatView"></div>
+          </div>
+        </div>
+        
+        <!-- TAB 3: Cola / Detalle -->
+        <div class="tab-content" id="tabCola">
+          <div class="queue-scroll" id="queueScroll">
+            <table class="queue-table">
+              <thead><tr><th>Nombre</th><th>Teléfono</th><th>Estado</th><th>Hora</th></tr></thead>
+              <tbody id="queueBody"><tr><td colspan="4" style="color:var(--muted);">Sin datos</td></tr></tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>
@@ -778,11 +838,26 @@ function getPanelHTML() {
 
 <script>
 let contactosCargados = null;
+let activeTab = 'tabLive';
+
+// ═══════════════════════════════════
+// TABS
+// ═══════════════════════════════════
+function switchTab(id) {
+  activeTab = id;
+  document.querySelectorAll('.tab').forEach((t,i) => {
+    t.classList.toggle('active', ['tabLive','tabConv','tabCola'][i] === id);
+  });
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  
+  if (id === 'tabConv') cargarConversaciones();
+  if (id === 'tabCola') cargarCola();
+}
 
 // ═══════════════════════════════════
 // ESTADO GENERAL
 // ═══════════════════════════════════
-
 async function cargarEstado() {
   try {
     const r = await fetch('/api/estado');
@@ -803,23 +878,17 @@ async function cargarEstado() {
       document.getElementById('sConv').textContent = d.chatbot.conversacionesActivas || 0;
       document.getElementById('sBot').textContent = d.chatbot.activo ? '✅ ON' : '⏸ OFF';
       document.getElementById('sBot').style.color = d.chatbot.activo ? 'var(--green)' : 'var(--muted)';
-      
-      const ga = document.getElementById('gestoresArea');
-      ga.innerHTML = (d.chatbot.gestores || []).map(g =>
+      document.getElementById('gestoresArea').innerHTML = (d.chatbot.gestores || []).map(g =>
         '<div class="gestor-row"><span>👤 ' + g.nombre + '</span><span style="color:var(--muted);font-size:0.82rem;">' + g.telefono + '</span></div>'
       ).join('');
     }
     
-    // Progreso del envío masivo
     if (d.progreso) {
       actualizarProgreso(d.progreso);
-      document.getElementById('sEnviados').textContent = 
-        (d.estadisticasEnvio?.config?.enviadosHoy || d.progreso.enviados || 0);
+      document.getElementById('sEnviados').textContent = d.estadisticasEnvio?.config?.enviadosHoy || d.progreso.enviados || 0;
     }
     
-    // Habilitar botón si hay contactos Y está conectado
     document.getElementById('btnIniciar').disabled = !(contactosCargados && d.conectado);
-    
   } catch(e) { console.error(e); }
 }
 
@@ -843,6 +912,7 @@ function actualizarProgreso(p) {
     btnP.disabled = false;
     btnC.disabled = false;
     btnP.textContent = p.pausado ? '▶ Reanudar' : '⏸ Pausar';
+    btnP.className = p.pausado ? 'btn btn-green btn-sm' : 'btn btn-yellow btn-sm';
     btnP.onclick = p.pausado ? reanudarCampana : pausarCampana;
   } else {
     btnP.disabled = true;
@@ -851,14 +921,163 @@ function actualizarProgreso(p) {
 }
 
 // ═══════════════════════════════════
+// LOG EN VIVO (ENVÍO MASIVO + CHATBOT)
+// ═══════════════════════════════════
+async function cargarLogVivo() {
+  if (activeTab !== 'tabLive') return;
+  try {
+    // Logs del envío masivo
+    const r1 = await fetch('/api/campana/logs?limite=30');
+    const logsEnvio = await r1.json();
+    
+    // Interacciones del chatbot
+    const r2 = await fetch('/api/chatbot/interacciones?limite=20');
+    const logsChat = await r2.json();
+    
+    // Combinar y ordenar por timestamp
+    const todos = [];
+    
+    logsEnvio.forEach(l => {
+      todos.push({
+        time: new Date(l.timestamp),
+        html: '<span class="log-tag ' + (l.tipo === 'enviado' ? 'ok' : 'err') + '">' + 
+          (l.tipo === 'enviado' ? '✅ ENVIADO' : '❌ FALLIDO') + '</span> ' +
+          '<span style="color:var(--text);">' + (l.nombre||'') + '</span> ' +
+          '<span style="color:var(--muted);">' + (l.telefono||'') + '</span>' +
+          (l.error ? ' <span style="color:var(--red);font-size:0.65rem;">' + l.error + '</span>' : '') +
+          ' <span style="color:var(--muted);font-size:0.65rem;">[' + l.progreso + ']</span>'
+      });
+    });
+    
+    logsChat.forEach(l => {
+      const tag = l.tipo === 'recibido' ? 'in' : l.tipo === 'enviado' ? 'out' : 'ok';
+      const label = l.tipo === 'recibido' ? '📩 RECIBIDO' : l.tipo === 'enviado' ? '🤖 BOT' : '🔄 ' + l.tipo.toUpperCase();
+      todos.push({
+        time: new Date(l.timestamp),
+        html: '<span class="log-tag ' + tag + '">' + label + '</span> ' +
+          '<span style="color:var(--muted);">' + l.telefono + '</span> ' +
+          '<span style="color:var(--text);">' + (l.detalle||'').substring(0,55) + '</span>'
+      });
+    });
+    
+    todos.sort((a,b) => b.time - a.time);
+    
+    const panel = document.getElementById('liveLog');
+    if (todos.length === 0) {
+      panel.innerHTML = '<div class="log-line"><span class="log-info">Esperando actividad...</span></div>';
+      return;
+    }
+    
+    panel.innerHTML = todos.slice(0, 50).map(t => {
+      const ts = t.time.toLocaleTimeString('es-MX', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+      return '<div class="log-line"><span class="log-time">' + ts + '</span><span>' + t.html + '</span></div>';
+    }).join('');
+    
+  } catch(e) {}
+}
+
+// ═══════════════════════════════════
+// CONVERSACIONES
+// ═══════════════════════════════════
+async function cargarConversaciones() {
+  try {
+    const r = await fetch('/api/chatbot/conversaciones');
+    const data = await r.json();
+    const list = document.getElementById('convList');
+    
+    if (!data.length) {
+      list.innerHTML = '<p style="color:var(--muted); font-size:0.82rem; text-align:center; padding:20px;">Nadie ha respondido aún</p>';
+      return;
+    }
+    
+    list.innerHTML = data.map(c => {
+      const estado = c.estado || 'inicial';
+      const tagCls = estado === 'esperando_gestor' ? 'tag-wait' : estado === 'menu' ? 'tag-info' : 'tag-ok';
+      return '<div class="conv-item" onclick="verConversacion(\\'' + c.telefono + '\\')">' +
+        '<div><div class="conv-name">' + (c.telefono) + '</div>' +
+        '<div style="font-size:0.72rem;color:var(--muted);">Estado: ' + estado + '</div></div>' +
+        '<span class="tag ' + tagCls + '">' + estado + '</span></div>';
+    }).join('');
+  } catch(e) {}
+}
+
+async function verConversacion(tel) {
+  document.getElementById('convListView').classList.add('hidden');
+  document.getElementById('convChatView').classList.remove('hidden');
+  
+  try {
+    const r = await fetch('/api/conversacion/' + encodeURIComponent(tel));
+    const d = await r.json();
+    
+    document.getElementById('chatNombre').textContent = d.cliente?.nombre || tel;
+    document.getElementById('chatTel').textContent = tel;
+    document.getElementById('chatEstado').textContent = d.estado;
+    
+    const view = document.getElementById('chatView');
+    
+    if (!d.mensajes?.length) {
+      view.innerHTML = '<p style="color:var(--muted);text-align:center;padding:20px;">Sin mensajes registrados</p>';
+      return;
+    }
+    
+    view.innerHTML = d.mensajes.map(m => {
+      const isSent = m.tipo === 'enviado';
+      const time = new Date(m.timestamp).toLocaleTimeString('es-MX', {hour:'2-digit',minute:'2-digit'});
+      return '<div class="chat-msg ' + (isSent ? 'sent' : 'received') + '">' +
+        '<div class="bubble">' + (m.detalle||'').replace(/\\n/g,'<br>') + '</div>' +
+        '<div class="meta">' + time + ' · ' + m.tipo + '</div></div>';
+    }).join('');
+    
+    view.scrollTop = view.scrollHeight;
+  } catch(e) {
+    document.getElementById('chatView').innerHTML = '<p style="color:var(--red);">Error cargando</p>';
+  }
+}
+
+function cerrarChat() {
+  document.getElementById('convChatView').classList.add('hidden');
+  document.getElementById('convListView').classList.remove('hidden');
+}
+
+// ═══════════════════════════════════
+// COLA / DETALLE
+// ═══════════════════════════════════
+async function cargarCola() {
+  try {
+    const r = await fetch('/api/campana/detalle');
+    const data = await r.json();
+    const body = document.getElementById('queueBody');
+    
+    if (!data.length) {
+      body.innerHTML = '<tr><td colspan="4" style="color:var(--muted);">No hay campaña activa</td></tr>';
+      return;
+    }
+    
+    body.innerHTML = data.map(d => {
+      let tagCls = 'tag-wait', icon = '⏳';
+      if (d.estado === 'enviado') { tagCls = 'tag-ok'; icon = '✅'; }
+      else if (d.estado === 'fallido') { tagCls = 'tag-err'; icon = '❌'; }
+      else if (d.estado === 'saltado') { tagCls = 'tag-err'; icon = '⏭'; }
+      
+      const hora = d.enviadoEn ? new Date(d.enviadoEn).toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '—';
+      
+      return '<tr>' +
+        '<td>' + (d.nombre||'—') + '</td>' +
+        '<td style="font-family:\\'JetBrains Mono\\',monospace;font-size:0.72rem;">' + (d.telefono||'—') + '</td>' +
+        '<td><span class="tag ' + tagCls + '">' + icon + ' ' + d.estado + '</span>' + 
+          (d.error ? '<br><span style="font-size:0.65rem;color:var(--red);">' + d.error + '</span>' : '') + '</td>' +
+        '<td style="color:var(--muted);font-size:0.72rem;">' + hora + '</td></tr>';
+    }).join('');
+  } catch(e) {}
+}
+
+// ═══════════════════════════════════
 // CONEXIÓN
 // ═══════════════════════════════════
-
 async function conectar() {
   await fetch('/api/conectar', { method:'POST' });
   setTimeout(verificarQR, 2000);
 }
-
 async function verificarQR() {
   const r = await fetch('/api/qr');
   const d = await r.json();
@@ -869,7 +1088,6 @@ async function verificarQR() {
   }
   setTimeout(cargarEstado, 3000);
 }
-
 async function desconectar() {
   await fetch('/api/desconectar', { method:'POST' });
   cargarEstado();
@@ -878,71 +1096,59 @@ async function desconectar() {
 // ═══════════════════════════════════
 // CARGAR EXCEL
 // ═══════════════════════════════════
-
 async function subirArchivo(input) {
   const file = input.files[0];
   if (!file) return;
-  
   const result = document.getElementById('fileResult');
   result.classList.remove('hidden');
   result.innerHTML = '<span class="tag tag-wait">Cargando...</span>';
-  
   const fd = new FormData();
   fd.append('archivo', file);
-  
   try {
     const r = await fetch('/api/subir-excel', { method:'POST', body:fd });
     const d = await r.json();
-    
     if (d.exito) {
       contactosCargados = d.datos;
-      
-      let html = '<span class="tag tag-ok">✅ ' + d.totalRegistros + ' contactos cargados</span>';
+      let html = '<span class="tag tag-ok">✅ ' + d.totalRegistros + ' contactos</span>';
       html += '<table class="preview-table"><tr>';
-      d.columnas.forEach(c => html += '<th>' + c + '</th>');
+      d.columnas.slice(0,5).forEach(c => html += '<th>' + c + '</th>');
       html += '</tr>';
-      (d.preview || []).forEach(row => {
+      (d.preview || []).slice(0,3).forEach(row => {
         html += '<tr>';
-        d.columnas.forEach(c => html += '<td>' + (row[c] || '') + '</td>');
+        d.columnas.slice(0,5).forEach(c => html += '<td>' + (row[c]||'') + '</td>');
         html += '</tr>';
       });
       html += '</table>';
-      
       result.innerHTML = html;
       document.getElementById('fileDrop').classList.add('active');
-      cargarEstado(); // Refresh para habilitar botón
+      cargarEstado();
     } else {
       result.innerHTML = '<span class="tag tag-err">❌ ' + d.mensaje + '</span>';
     }
   } catch(e) {
-    result.innerHTML = '<span class="tag tag-err">❌ Error: ' + e.message + '</span>';
+    result.innerHTML = '<span class="tag tag-err">❌ ' + e.message + '</span>';
   }
   input.value = '';
 }
 
-// Drag & drop
 const drop = document.getElementById('fileDrop');
-drop.addEventListener('dragover', e => { e.preventDefault(); drop.style.borderColor = 'var(--accent)'; });
-drop.addEventListener('dragleave', () => { drop.style.borderColor = ''; });
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.style.borderColor='var(--accent)'; });
+drop.addEventListener('dragleave', () => { drop.style.borderColor=''; });
 drop.addEventListener('drop', e => {
-  e.preventDefault();
-  drop.style.borderColor = '';
+  e.preventDefault(); drop.style.borderColor='';
   const fi = document.getElementById('fileInput');
   fi.files = e.dataTransfer.files;
   subirArchivo(fi);
 });
 
 // ═══════════════════════════════════
-// CAMPAÑA MASIVA
+// CAMPAÑA
 // ═══════════════════════════════════
-
 async function iniciarCampana() {
-  if (!contactosCargados?.length) return alert('Primero carga un Excel con contactos');
-  
+  if (!contactosCargados?.length) return alert('Primero carga un Excel');
   const plantilla = document.getElementById('campPlantilla').value.trim();
   const imgInput = document.getElementById('campImagen');
-  
-  if (!plantilla && !imgInput.files[0]) return alert('Escribe un mensaje o selecciona una imagen');
+  if (!plantilla && !imgInput.files[0]) return alert('Escribe un mensaje o selecciona imagen');
   
   const fd = new FormData();
   fd.append('contactos', JSON.stringify(contactosCargados));
@@ -954,77 +1160,33 @@ async function iniciarCampana() {
     tamanoLote: parseInt(document.getElementById('cfgLote').value),
     limiteDiario: parseInt(document.getElementById('cfgLimite').value),
   }));
-  
   if (imgInput.files[0]) fd.append('imagen', imgInput.files[0]);
   
   try {
     const r = await fetch('/api/campana/iniciar', { method:'POST', body:fd });
     const d = await r.json();
-    
-    if (d.exito) {
-      addLog('✅ Campaña iniciada: ' + d.campana, 'ok');
-    } else {
-      addLog('❌ ' + d.mensaje, 'err');
-    }
+    if (d.exito) { switchTab('tabLive'); }
+    else { alert(d.mensaje); }
     cargarEstado();
-  } catch(e) {
-    addLog('❌ Error: ' + e.message, 'err');
-  }
+  } catch(e) { alert('Error: ' + e.message); }
 }
-
-async function pausarCampana() {
-  await fetch('/api/campana/pausar', { method:'POST' });
-  addLog('⏸ Campaña pausada', 'info');
-  cargarEstado();
-}
-
-async function reanudarCampana() {
-  await fetch('/api/campana/reanudar', { method:'POST' });
-  addLog('▶ Campaña reanudada', 'info');
-  cargarEstado();
-}
-
+async function pausarCampana() { await fetch('/api/campana/pausar',{method:'POST'}); cargarEstado(); }
+async function reanudarCampana() { await fetch('/api/campana/reanudar',{method:'POST'}); cargarEstado(); }
 async function cancelarCampana() {
-  if (!confirm('¿Cancelar el envío masivo?')) return;
-  await fetch('/api/campana/cancelar', { method:'POST' });
-  addLog('🛑 Campaña cancelada', 'err');
+  if (!confirm('¿Cancelar envío?')) return;
+  await fetch('/api/campana/cancelar',{method:'POST'});
   cargarEstado();
-}
-
-// ═══════════════════════════════════
-// LOG / INTERACCIONES
-// ═══════════════════════════════════
-
-function addLog(text, type) {
-  const panel = document.getElementById('logPanel');
-  const time = new Date().toLocaleTimeString('es-MX', {hour:'2-digit',minute:'2-digit'});
-  const cls = type === 'ok' ? 'log-ok' : type === 'err' ? 'log-err' : 'log-info';
-  panel.innerHTML = '<div class="log-line"><span class="log-time">' + time + '</span><span class="' + cls + '">' + text + '</span></div>' + panel.innerHTML;
-  if (panel.children.length > 50) panel.removeChild(panel.lastChild);
-}
-
-async function cargarLog() {
-  try {
-    const r = await fetch('/api/chatbot/interacciones?limite=15');
-    const data = await r.json();
-    if (!data.length) return;
-    const panel = document.getElementById('logPanel');
-    panel.innerHTML = data.reverse().map(i => {
-      const t = new Date(i.timestamp).toLocaleTimeString('es-MX', {hour:'2-digit',minute:'2-digit'});
-      const cls = i.tipo === 'enviado' ? 'log-ok' : i.tipo === 'recibido' ? 'log-info' : 'log-err';
-      return '<div class="log-line"><span class="log-time">' + t + '</span><span class="' + cls + '">' + i.telefono + ' ' + i.tipo + ': ' + (i.detalle||'').substring(0,45) + '</span></div>';
-    }).join('');
-  } catch(e) {}
 }
 
 // ═══════════════════════════════════
 // INIT
 // ═══════════════════════════════════
-
 cargarEstado();
-cargarLog();
+cargarLogVivo();
 setInterval(cargarEstado, 4000);
-setInterval(cargarLog, 8000);
+setInterval(cargarLogVivo, 3000);
+setInterval(() => { if (activeTab === 'tabCola') cargarCola(); }, 5000);
+setInterval(() => { if (activeTab === 'tabConv') cargarConversaciones(); }, 6000);
 </script>
 </body>
 </html>`;
