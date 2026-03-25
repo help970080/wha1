@@ -1,9 +1,17 @@
 /**
+ * ═══════════════════════════════════════════════════════════
  * ChatBot de Cobranza - LeGaXi Asesores
- * ==========================================
- * Responde automáticamente a clientes
- * Notifica a gestores cuando es necesario
- * VERSIÓN: Cobranza Firme
+ * Cobranza Mercantil Especializada
+ * ═══════════════════════════════════════════════════════════
+ * 
+ * ✅ Respuestas automáticas a clientes
+ * ✅ Convenios en 4, 8 y 12 pagos
+ * ✅ Datos bancarios reales (SPIN-OXXO / BBVA)
+ * ✅ Notificación a gestores
+ * ✅ Detección de excusas/negativas/agresiones
+ * 
+ * Lic. Francisco Gabriel García Sánchez
+ * ═══════════════════════════════════════════════════════════
  */
 
 const fs = require('fs');
@@ -18,6 +26,21 @@ class ChatBotCobranza {
       { nombre: 'Lic. Gustavo', telefono: '5548039744', activo: true }
     ];
     this.gestorActual = 0;
+    
+    // Datos bancarios reales
+    this.datosBancarios = {
+      spinOxxo: {
+        nombre: 'SPIN - OXXO',
+        clabe: '7289 6900 0166 6769 82',
+        tarjeta: '4217 4702 1177 5578',
+      },
+      bbva: {
+        nombre: 'BBVA - BANCOMER',
+        clabe: '0121 8001 5055 5747 30',
+        tarjeta: '4152 3143 7377 5678',
+      },
+      titular: 'Lic. Francisco Gabriel García Sánchez',
+    };
     
     // Datos en memoria
     this.clientes = new Map();
@@ -35,12 +58,11 @@ class ChatBotCobranza {
       EXCUSAS: 'excusas'
     };
 
-    // Niveles de morosidad (días de atraso)
     this.NIVELES = {
-      LEVE: 15,      // 1-15 días
-      MODERADO: 30,  // 16-30 días
-      GRAVE: 60,     // 31-60 días
-      CRITICO: 90    // 61+ días
+      LEVE: 15,
+      MODERADO: 30,
+      GRAVE: 60,
+      CRITICO: 90
     };
     
     this.activo = false;
@@ -52,7 +74,7 @@ class ChatBotCobranza {
     
     console.log('\n🤖 ════════════════════════════════════');
     console.log('   CHATBOT DE COBRANZA INICIADO');
-    console.log('   LeGaXi Asesores');
+    console.log('   LeGaXi Asesores - CME');
     console.log('   MODO: COBRANZA FIRME');
     console.log('════════════════════════════════════\n');
     
@@ -66,12 +88,16 @@ class ChatBotCobranza {
     console.log(`📊 Clientes cargados: ${this.clientes.size}\n`);
   }
 
-  // Obtener nivel de morosidad
   getNivelMorosidad(diasAtraso) {
     if (diasAtraso <= this.NIVELES.LEVE) return 'LEVE';
     if (diasAtraso <= this.NIVELES.MODERADO) return 'MODERADO';
     if (diasAtraso <= this.NIVELES.GRAVE) return 'GRAVE';
     return 'CRITICO';
+  }
+
+  // Formato de dinero bonito
+  fmt(cantidad) {
+    return '$' + Math.round(cantidad).toLocaleString('es-MX');
   }
 
   async procesarMensaje(msg) {
@@ -119,28 +145,23 @@ class ChatBotCobranza {
     const conv = this.obtenerConversacion(telefono);
     const nivel = this.getNivelMorosidad(cliente.diasAtraso || 0);
     
-    // Detectar excusas comunes
     if (this.esExcusa(textoLimpio)) {
       return this.manejarExcusa(telefono, textoLimpio, cliente, nivel);
     }
 
-    // Detectar negativas o evasiones
     if (this.esNegativa(textoLimpio)) {
       return this.manejarNegativa(telefono, cliente, nivel);
     }
 
-    // Detectar agresiones o groserías
     if (this.esAgresion(textoLimpio)) {
       return this.manejarAgresion(telefono, cliente);
     }
     
-    // Comandos globales
     if (['hola', 'hi', 'menu', 'inicio', 'buenos dias', 'buenas tardes', 'buenas noches'].some(cmd => textoLimpio.includes(cmd))) {
       this.guardarConversacion(telefono, this.ESTADOS.MENU);
       return this.msgBienvenida(cliente, nivel);
     }
     
-    // Procesar según estado
     switch (conv.estado) {
       case this.ESTADOS.MENU:
         return this.procesarMenu(telefono, textoLimpio, cliente, nivel);
@@ -195,6 +216,28 @@ class ChatBotCobranza {
   }
 
   // ═══════════════════════════════════════
+  // DATOS BANCARIOS (mensaje reutilizable)
+  // ═══════════════════════════════════════
+
+  getDatosBancarios(referencia) {
+    const b = this.datosBancarios;
+    return `━━━━━━━━━━━━━━━━━━━━━
+🏪 *${b.spinOxxo.nombre}*
+━━━━━━━━━━━━━━━━━━━━━
+📋 CLABE: *${b.spinOxxo.clabe}*
+💳 Tarjeta: *${b.spinOxxo.tarjeta}*
+
+━━━━━━━━━━━━━━━━━━━━━
+🏦 *${b.bbva.nombre}*
+━━━━━━━━━━━━━━━━━━━━━
+📋 CLABE: *${b.bbva.clabe}*
+💳 Tarjeta: *${b.bbva.tarjeta}*
+
+👤 A nombre de: *${b.titular}*
+📝 Referencia: *${referencia}*`;
+  }
+
+  // ═══════════════════════════════════════
   // MANEJO DE SITUACIONES ESPECIALES
   // ═══════════════════════════════════════
 
@@ -202,172 +245,156 @@ class ChatBotCobranza {
     this.guardarConversacion(telefono, this.ESTADOS.EXCUSAS);
     const saldo = cliente.saldo || 0;
     const dias = cliente.diasAtraso || 0;
+    const nombre = cliente.nombre?.split(' ')[0] || 'Cliente';
 
-    // Excusa: "Ya pagué"
+    // "Ya pagué"
     if (texto.includes('ya pagué') || texto.includes('ya pague') || texto.includes('está pagado')) {
-      return `⚠️ *IMPORTANTE*
+      return `⚠️ *VERIFICACIÓN DE PAGO*
 
-No tenemos registro de su pago.
+${nombre}, no encontramos registro de su pago en nuestro sistema.
 
-Si ya realizó el pago, envíe su comprobante *AHORA* para aclararlo.
+Si ya realizó el depósito, envíe su comprobante *ahora mismo* para validarlo.
 
-Sin comprobante, su deuda de *$${saldo.toLocaleString('es-MX')}* sigue vigente y las acciones de cobranza continuarán.
+💰 Deuda registrada: *${this.fmt(saldo)}*
 
-📸 Envíe foto del comprobante`;
+Sin comprobante, la deuda sigue vigente y las acciones de cobranza continúan.
+
+📸 *Envíe foto del comprobante*`;
     }
 
-    // Excusa: "No es mi deuda"
+    // "No es mi deuda"
     if (texto.includes('no es mío') || texto.includes('no reconozco') || texto.includes('yo no saqué')) {
-      return `⚠️ *AVISO LEGAL*
+      return `⚖️ *AVISO LEGAL*
 
-El crédito está registrado a su nombre con los siguientes datos verificados:
-• Teléfono: ${telefono}
+El crédito está registrado con datos verificados:
+• Teléfono confirmado
 • Identificación oficial
 • Comprobante de domicilio
 
-Si es víctima de *fraude de identidad*, tiene 24 horas para presentar:
-1️⃣ Denuncia ante el MP
+Si es víctima de fraude de identidad, tiene *24 horas* para presentar:
+
+1️⃣ Denuncia ante el Ministerio Público
 2️⃣ Reporte a CONDUSEF
 
-De lo contrario, usted es *legalmente responsable* de esta deuda.
+De lo contrario, usted es legalmente responsable.
 
-¿Desea hablar con un asesor legal?
+¿Desea hablar con un asesor?
 Responda *SI* o *NO*`;
     }
 
-    // Excusa temporal: "Después", "Mañana", "Quincena"
+    // "Después", "Mañana", "Quincena"
     if (texto.includes('después') || texto.includes('mañana') || texto.includes('quincena') || texto.includes('fin de mes')) {
       if (nivel === 'CRITICO' || nivel === 'GRAVE') {
-        return `🚫 *YA NO HAY MÁS TIEMPO*
+        return `🚫 *SIN PRÓRROGAS DISPONIBLES*
 
-Sr(a). ${cliente.nombre || 'Cliente'}:
+${nombre}, su cuenta tiene *${dias} días de atraso*.
 
-Su cuenta tiene *${dias} DÍAS DE ATRASO*.
-Ya se agotaron todas las prórrogas.
+⚖️ Consecuencias activas:
+  ▸ Buró de Crédito (reportado)
+  ▸ Intereses moratorios acumulándose
+  ▸ Cobranza judicial en proceso
 
-⚖️ *CONSECUENCIAS INMEDIATAS:*
-• Reporte a Buró de Crédito (ya activo)
-• Incremento de intereses moratorios
-• Inicio de proceso de cobranza judicial
+Pague hoy mínimo *${this.fmt(saldo * 0.3)}* para detener acciones.
 
-💰 Pague HOY mínimo *$${Math.round(saldo * 0.3).toLocaleString('es-MX')}* para detener acciones.
-
-¿Va a pagar ahora?
-1️⃣ SÍ, voy a pagar
-2️⃣ Necesito hablar con un asesor`;
+1️⃣ Voy a pagar ahora
+2️⃣ Necesito hablar con asesor`;
       } else {
         return `📅 *COMPROMISO DE PAGO*
 
-Entiendo su situación, pero su deuda no puede esperar más.
+Entendemos, pero su deuda no puede esperar.
 
-Deuda actual: *$${saldo.toLocaleString('es-MX')}*
-Días de atraso: *${dias}*
+💰 Deuda: *${this.fmt(saldo)}*
+📅 Atraso: *${dias} días*
 
-¿Cuándo exactamente puede pagar?
+¿Cuándo puede pagar?
+
 1️⃣ Hoy mismo
 2️⃣ Mañana sin falta
-3️⃣ Esta semana (máximo viernes)
-4️⃣ Necesito un convenio formal
+3️⃣ Esta semana
+4️⃣ Necesito un convenio
 
-⚠️ Sin compromiso concreto, su caso escala a cobranza externa.`;
+⚠️ Sin compromiso, su caso escala a cobranza externa.`;
       }
     }
 
-    // Excusa económica: "No tengo dinero"
+    // "No tengo dinero"
     if (texto.includes('no tengo') || texto.includes('no me alcanza') || texto.includes('sin dinero')) {
-      return `💡 *SOLUCIONES DISPONIBLES*
+      return `💡 *OPCIONES DE SOLUCIÓN*
 
-Entendemos la situación económica, PERO la deuda existe y debe resolverse.
+La deuda existe y debe resolverse. Tenemos opciones:
 
-*OPCIONES REALISTAS:*
+1️⃣ *Pago mínimo hoy* — ${this.fmt(saldo * 0.1)}
+   Detiene llamadas 7 días
 
-1️⃣ *Pago mínimo HOY* - $${Math.round(saldo * 0.1).toLocaleString('es-MX')} (10%)
-   Detiene llamadas por 7 días
+2️⃣ *Convenio semanal* — Desde ${this.fmt(saldo / 12)}/semana
+   Plan hasta 12 semanas
 
-2️⃣ *Convenio de pagos* - Desde $${Math.round(saldo / 8).toLocaleString('es-MX')}/semana
-   Plan a 8 semanas
-
-3️⃣ *Liquidación total* - $${saldo.toLocaleString('es-MX')}
-   Libérese de la deuda hoy
+3️⃣ *Liquidar todo* — ${this.fmt(saldo)}
+   Cierre su deuda de una vez
 
 4️⃣ Hablar con asesor para negociar
 
-❌ "No tengo" no es opción. Todos tienen *algo*.
-   ¿Vende algo? ¿Pide prestado? ¿Empeña?
-
-Responda con el número de su opción:`;
+Responda con el *número*:`;
     }
 
     // Excusa genérica
-    return `⚠️ *AVISO IMPORTANTE*
+    return `⚠️ *AVISO*
 
-Sr(a). ${cliente.nombre || 'Cliente'}:
-
-Las excusas NO eliminan su deuda de *$${saldo.toLocaleString('es-MX')}*.
+${nombre}, las excusas no eliminan su deuda de *${this.fmt(saldo)}*.
 
 Cada día que pasa:
-❌ Aumentan los intereses
-❌ Se afecta más su historial crediticio
-❌ Se acerca la acción legal
+  ▸ Aumentan intereses
+  ▸ Se afecta su historial crediticio
+  ▸ Se acerca la acción legal
 
-*ACTÚE AHORA:*
-1️⃣ Pagar hoy (con descuento)
+1️⃣ Pagar hoy
 2️⃣ Hacer un convenio
 3️⃣ Hablar con asesor
 
-No responder = Aceptar consecuencias legales`;
+_No responder = Aceptar consecuencias_`;
   }
 
   manejarNegativa(telefono, cliente, nivel) {
     const saldo = cliente.saldo || 0;
     const dias = cliente.diasAtraso || 0;
 
-    this.conectarGestor(telefono, cliente, '🚨 CLIENTE NEGADO A PAGAR - Requiere atención especial');
+    this.conectarGestor(telefono, cliente, '🚨 CLIENTE NEGADO A PAGAR');
 
     return `⚖️ *NOTIFICACIÓN LEGAL*
 
-Su negativa a pagar ha quedado registrada.
+Su negativa ha quedado registrada.
 
-*DATOS DEL ADEUDO:*
-• Deudor: ${cliente.nombre || 'Titular'}
-• Monto: $${saldo.toLocaleString('es-MX')}
-• Atraso: ${dias} días
-• Fecha: ${new Date().toLocaleDateString('es-MX')}
+┌─────────────────────────
+│ 👤 ${cliente.nombre || 'Titular'}
+│ 💰 ${this.fmt(saldo)}
+│ 📅 ${dias} días de atraso
+│ 🗓️ ${new Date().toLocaleDateString('es-MX')}
+└─────────────────────────
 
-*CONSECUENCIAS DE NO PAGAR:*
+*Consecuencias:*
 
-1️⃣ *BURÓ DE CRÉDITO*
-   Su historial quedará manchado por 6 AÑOS
-   No podrá obtener: créditos, tarjetas, hipotecas, auto
+▸ *Buró de Crédito* — Historial manchado 6 años
+▸ *Demanda civil* — Gastos legales a su cargo
+▸ *Cobranza domiciliaria* — Visitas y notificación a referencias
 
-2️⃣ *COBRANZA JUDICIAL*
-   Demanda civil por la cantidad adeudada
-   Gastos y costas legales a su cargo
-   Embargo de bienes
+⏰ Tiene *24 horas* para reconsiderar.
+Un asesor legal se comunicará con usted.
 
-3️⃣ *COBRANZA EN DOMICILIO*
-   Visitas a su domicilio registrado
-   Notificación a referencias personales
-
-⏰ Tiene *24 HORAS* para reconsiderar.
-
-Un asesor legal se comunicará con usted.`;
+_Cobranza Mercantil Especializada_`;
   }
 
   manejarAgresion(telefono, cliente) {
-    this.conectarGestor(telefono, cliente, '⚠️ CLIENTE AGRESIVO - Posible caso legal');
+    this.conectarGestor(telefono, cliente, '⚠️ CLIENTE AGRESIVO');
 
     return `⚠️ *ADVERTENCIA*
 
-Su mensaje ha sido registrado y guardado.
+Su mensaje fue registrado y almacenado.
 
-Las agresiones verbales no eliminan su deuda ni intimidan a esta institución.
-
-Este chat puede ser usado como *evidencia* en procedimientos legales.
+Las agresiones no eliminan su deuda ni intimidan a esta institución. Este chat puede usarse como *evidencia legal*.
 
 Un supervisor revisará su caso.
 
-_LeGaXi Asesores_`;
+_Cobranza Mercantil Especializada_`;
   }
 
   procesarExcusa(telefono, texto, cliente, nivel) {
@@ -423,24 +450,88 @@ _LeGaXi Asesores_`;
   }
 
   procesarConvenio(telefono, texto, cliente, nivel) {
+    const saldo = cliente.saldo || 0;
+    
     switch (texto) {
-      case '1':
-        return this.conectarGestor(telefono, cliente, 'Solicita llamada para convenio');
-      case '2':
-        return this.conectarGestor(telefono, cliente, 'Solicita WhatsApp para convenio');
-      case '3':
-        if (nivel === 'CRITICO' || nivel === 'GRAVE') {
+      case '1': {
+        // Convenio 4 pagos — mostrar datos bancarios
+        const monto = Math.round(saldo / 4);
+        return `✅ *CONVENIO 4 PAGOS SELECCIONADO*
+
+${cliente.nombre?.split(' ')[0] || 'Cliente'}, su plan queda así:
+
+┌─────────────────────────
+│ 💰 Deuda total: *${this.fmt(saldo)}*
+│ 📦 Pagos: *4 semanales*
+│ 💵 Monto c/pago: *${this.fmt(monto)}*
+└─────────────────────────
+
+Realice su *primer pago hoy* para activar:
+
+${this.getDatosBancarios(telefono)}
+
+📸 Envíe foto del comprobante aquí.
+
+⚠️ _Un pago faltante cancela el convenio._
+
+_Cobranza Mercantil Especializada_`;
+      }
+      case '2': {
+        // Convenio 8 pagos
+        const monto = Math.round(saldo / 8);
+        return `✅ *CONVENIO 8 PAGOS SELECCIONADO*
+
+${cliente.nombre?.split(' ')[0] || 'Cliente'}, su plan queda así:
+
+┌─────────────────────────
+│ 💰 Deuda total: *${this.fmt(saldo)}*
+│ 📦 Pagos: *8 semanales*
+│ 💵 Monto c/pago: *${this.fmt(monto)}*
+└─────────────────────────
+
+Realice su *primer pago hoy* para activar:
+
+${this.getDatosBancarios(telefono)}
+
+📸 Envíe foto del comprobante aquí.
+
+⚠️ _Un pago faltante cancela el convenio._
+
+_Cobranza Mercantil Especializada_`;
+      }
+      case '3': {
+        // Convenio 12 pagos
+        if (nivel === 'CRITICO') {
           return `⚠️ *NO DISPONIBLE*
 
-Debido a su nivel de atraso (*${cliente.diasAtraso} días*), ya no puede posponer.
+Por su nivel de atraso (*${cliente.diasAtraso} días*), el plan a 12 pagos no está disponible.
 
-Debe hablar con un asesor AHORA para evitar acciones legales.
-
-1️⃣ Que me llamen
-2️⃣ Por WhatsApp`;
+Opciones vigentes:
+1️⃣ Plan 4 pagos — *${this.fmt(saldo / 4)}*/semana
+2️⃣ Plan 8 pagos — *${this.fmt(saldo / 8)}*/semana
+4️⃣ Hablar con asesor`;
         }
-        this.guardarConversacion(telefono, this.ESTADOS.MENU);
-        return `Tiene *48 horas* para comunicarse, después su caso escala.\n\nEscriba *HOLA* cuando esté listo.\n\n_LeGaXi Asesores_`;
+        const monto = Math.round(saldo / 12);
+        return `✅ *CONVENIO 12 PAGOS SELECCIONADO*
+
+${cliente.nombre?.split(' ')[0] || 'Cliente'}, su plan queda así:
+
+┌─────────────────────────
+│ 💰 Deuda total: *${this.fmt(saldo)}*
+│ 📦 Pagos: *12 semanales*
+│ 💵 Monto c/pago: *${this.fmt(monto)}*
+└─────────────────────────
+
+Realice su *primer pago hoy* para activar:
+
+${this.getDatosBancarios(telefono)}
+
+📸 Envíe foto del comprobante aquí.
+
+_Cobranza Mercantil Especializada_`;
+      }
+      case '4':
+        return this.conectarGestor(telefono, cliente, 'Solicita asesor para convenio');
       default:
         return this.msgNoEntendido(nivel);
     }
@@ -456,14 +547,14 @@ Debe hablar con un asesor AHORA para evitar acciones legales.
     
     const notif = `🔔 *NUEVA SOLICITUD* ${prioridad}
 
-👤 *Cliente:* ${cliente.nombre || 'No registrado'}
-📱 *Tel:* ${telefono}
-💰 *Saldo:* $${(cliente.saldo || 0).toLocaleString('es-MX')}
-📅 *Atraso:* ${cliente.diasAtraso || 'N/A'} días
-⚠️ *Nivel:* ${nivel}
+┌─────────────────────────
+│ 👤 *${cliente.nombre || 'No registrado'}*
+│ 📱 ${telefono}
+│ 💰 ${this.fmt(cliente.saldo || 0)}
+│ 📅 ${cliente.diasAtraso || 'N/A'} días — ${nivel}
+└─────────────────────────
 
-📋 *Motivo:* ${motivo}
-
+📋 *${motivo}*
 ⏰ ${new Date().toLocaleString('es-MX')}`;
 
     const jidGestor = '52' + gestor.telefono + '@s.whatsapp.net';
@@ -471,26 +562,27 @@ Debe hablar con un asesor AHORA para evitar acciones legales.
       console.error('Error notificando gestor:', e.message);
     });
     
-    console.log(`📤 Notificación enviada a ${gestor.nombre} [${prioridad}]`);
+    console.log(`📤 Notificación → ${gestor.nombre} [${prioridad}]`);
     
-    return `👤 *CONECTANDO CON ASESOR*
+    return `👤 *ASESOR ASIGNADO*
 
-Su caso ha sido asignado a *${gestor.nombre}*.
+Su caso fue asignado a *${gestor.nombre}*.
 
 ${nivel === 'CRITICO' || nivel === 'GRAVE' ? 
-'⚠️ *CASO PRIORITARIO* - Será contactado en minutos.' :
-'Será contactado pronto.'}
+'⚠️ *Caso prioritario* — Será contactado en minutos.' :
+'Le contactarán pronto.'}
 
-📞 Urgente: ${gestor.telefono}
+📞 Línea directa: ${gestor.telefono}
 
-⏰ Horario: Lunes a Viernes 9:00-18:00
-   Sábado: 9:00-14:00`;
+🕐 Lun-Vie 9:00 a 18:00
+🕐 Sáb 9:00 a 14:00
+
+_Cobranza Mercantil Especializada_`;
   }
 
   async manejarImagen(jid, telefono) {
     const cliente = this.obtenerCliente(telefono);
     this.registrarInteraccion(telefono, 'imagen', 'Posible comprobante');
-    
     this.conectarGestor(telefono, cliente, '📷 Envió imagen (posible comprobante)');
     
     await this.whatsapp.sock.sendMessage(jid, { 
@@ -498,25 +590,26 @@ ${nivel === 'CRITICO' || nivel === 'GRAVE' ?
 
 Estamos verificando su pago.
 
-⏱️ Tiempo de validación: 30 minutos a 2 horas
+⏱️ Validación: 30 min a 2 horas
 
-📌 Si su pago es válido, recibirá confirmación.
-📌 Si hay algún problema, le notificaremos.
+✅ Si es válido, recibirá confirmación
+❌ Si hay error, le notificaremos
 
 Gracias por su pago.
-_LeGaXi Asesores_` 
+_Cobranza Mercantil Especializada_` 
     });
   }
 
   msgEsperandoGestor(conv, nivel) {
+    const tel = conv.gestor?.telefono || this.gestores[0].telefono;
     if (nivel === 'CRITICO') {
-      return `⏳ Su caso URGENTE ya está siendo atendido.\n\nSi no recibe llamada en 10 minutos:\n📞 ${conv.gestor?.telefono || this.gestores[0].telefono}`;
+      return `⏳ Su caso *urgente* ya está siendo atendido.\n\nSi no recibe llamada en 10 min:\n📞 ${tel}`;
     }
-    return `Su solicitud ya fue registrada.\n\nUn asesor lo contactará pronto.\n\n📞 Urgente: ${conv.gestor?.telefono || this.gestores[0].telefono}`;
+    return `Su solicitud ya fue registrada.\nUn asesor lo contactará pronto.\n\n📞 Línea directa: ${tel}`;
   }
 
   // ═══════════════════════════════════════
-  // MENSAJES SEGÚN NIVEL DE MOROSIDAD
+  // MENSAJES PRINCIPALES
   // ═══════════════════════════════════════
 
   msgBienvenida(cliente, nivel) {
@@ -524,70 +617,76 @@ _LeGaXi Asesores_`
     const saldo = cliente.saldo || 0;
     const dias = cliente.diasAtraso || 0;
 
-    let header = '';
-    let urgencia = '';
+    let header, info;
 
     switch (nivel) {
       case 'CRITICO':
-        header = `🚨 *ALERTA DE COBRANZA JUDICIAL*`;
-        urgencia = `\n⚠️ *${dias} DÍAS DE ATRASO*\n💰 Deuda: *$${saldo.toLocaleString('es-MX')}*\n⚖️ Su caso está por turnarse al área legal.\n`;
+        header = `🚨 *ALERTA — COBRANZA JUDICIAL*`;
+        info = `\n⚠️ *${dias} días de atraso*\n💰 Deuda: *${this.fmt(saldo)}*\n⚖️ Su caso está por turnarse al área legal.\n`;
         break;
       case 'GRAVE':
-        header = `⚠️ *AVISO URGENTE DE COBRANZA*`;
-        urgencia = `\n📅 *${dias} días de atraso*\n💰 Deuda: *$${saldo.toLocaleString('es-MX')}*\n❌ Su historial crediticio está siendo afectado.\n`;
+        header = `⚠️ *AVISO URGENTE*`;
+        info = `\n📅 *${dias} días de atraso*\n💰 Deuda: *${this.fmt(saldo)}*\n❌ Su historial crediticio está siendo afectado.\n`;
         break;
       case 'MODERADO':
         header = `📋 *RECORDATORIO DE PAGO*`;
-        urgencia = `\n📅 Atraso: ${dias} días\n💰 Saldo: $${saldo.toLocaleString('es-MX')}\n`;
+        info = `\n📅 Atraso: ${dias} días\n💰 Saldo: ${this.fmt(saldo)}\n`;
         break;
       default:
         header = `📞 *LeGaXi Asesores*`;
-        urgencia = saldo > 0 ? `\n💰 Saldo pendiente: $${saldo.toLocaleString('es-MX')}\n` : '';
+        info = saldo > 0 ? `\n💰 Saldo pendiente: ${this.fmt(saldo)}\n` : '';
     }
 
     return `${header}
 
-Hola *${nombre}*${urgencia}
-¿Qué desea hacer?
+Hola *${nombre}* 👋${info}
+Seleccione una opción:
 
-1️⃣ *PAGAR* mi adeudo
-2️⃣ *CONVENIO* de pago
-3️⃣ *CONSULTAR* mi saldo
-4️⃣ *HABLAR* con asesor
+1️⃣  💳  *Pagar* mi adeudo
+2️⃣  📋  *Convenio* de pagos
+3️⃣  🔍  *Consultar* mi saldo
+4️⃣  👤  *Hablar* con asesor
 
-_Responda con el número_`;
+_Responda con el número_
+
+━━━━━━━━━━━━━━━━━━━━━
+_Cobranza Mercantil Especializada_`;
   }
 
   msgOpcionesPago(cliente, nivel) {
     const saldo = cliente.saldo || 0;
 
-    return `💰 *OPCIONES DE PAGO*
+    return `💳 *OPCIONES DE PAGO*
 
-Saldo actual: *$${saldo.toLocaleString('es-MX')}*
+┌─────────────────────────
+│ Saldo actual: *${this.fmt(saldo)}*
+└─────────────────────────
 
-1️⃣ *Pago total* - Liquide su deuda
-2️⃣ *Pago parcial* - Abone lo que pueda
-3️⃣ *Plan de pagos* - Parcialidades
-4️⃣ *Hablar con asesor*
+1️⃣  💰  *Pago total* — Liquide su deuda
+2️⃣  💵  *Pago parcial* — Abone lo que pueda
+3️⃣  📋  *Plan de pagos* — Parcialidades
+4️⃣  👤  *Hablar con asesor*
 
 _Responda con el número_`;
   }
 
   msgPagoTotal(cliente, nivel) {
     const saldo = cliente.saldo || 0;
+    const nombre = cliente.nombre?.split(' ')[0] || 'Cliente';
 
-    return `🎉 *¡EXCELENTE DECISIÓN!*
+    return `🎉 *¡EXCELENTE DECISIÓN, ${nombre}!*
 
-*TOTAL A PAGAR: $${saldo.toLocaleString('es-MX')}*
+┌─────────────────────────
+│ 💰 TOTAL A PAGAR: *${this.fmt(saldo)}*
+└─────────────────────────
 
-📱 *DATOS PARA PAGO:*
+Deposite en cualquiera de estas cuentas:
 
-🏦 Banco: BBVA
-📋 CLABE: 012345678901234567
-👤 A nombre de: LeGaXi Asesores
-📝 Referencia: ${cliente.telefono || 'Su número'}
+${this.getDatosBancarios(cliente.telefono || 'Su número')}
 
-📸 Envíe foto de su comprobante aquí para confirmar.`;
+📸 *Envíe foto del comprobante aquí* para confirmar su pago y liberar su cuenta.
+
+_Cobranza Mercantil Especializada_`;
   }
 
   msgPagoParcial(cliente, nivel) {
@@ -597,72 +696,87 @@ _Responda con el número_`;
     return `💵 *PAGO PARCIAL*
 
 ${nivel === 'CRITICO' || nivel === 'GRAVE' ? 
-`⚠️ Debido a su atraso, el pago mínimo es:\n*$${minimo.toLocaleString('es-MX')}*` :
-`Puede abonar desde *$${minimo.toLocaleString('es-MX')}*`}
+`⚠️ Por su nivel de atraso, el mínimo es:\n*${this.fmt(minimo)}*` :
+`Puede abonar desde *${this.fmt(minimo)}*`}
 
-📱 *DATOS:*
-🏦 Banco: BBVA
-📋 CLABE: 012345678901234567
-👤 LeGaXi Asesores
+${this.getDatosBancarios(cliente.telefono || 'Su número')}
 
 ✅ Cada pago reduce su deuda
-✅ Detiene acciones de cobranza temporalmente
-✅ Mejora su situación
+✅ Detiene acciones temporalmente
 
-📸 Envíe su comprobante aquí.`;
+📸 *Envíe comprobante aquí*
+
+_Cobranza Mercantil Especializada_`;
   }
 
   msgConvenio(cliente, nivel) {
     const saldo = cliente.saldo || 0;
+    const nombre = cliente.nombre?.split(' ')[0] || 'Cliente';
 
     if (nivel === 'CRITICO') {
-      return `📋 *CONVENIO DE ÚLTIMA OPORTUNIDAD*
+      return `📋 *CONVENIO — ÚLTIMA OPORTUNIDAD*
 
-⚠️ Por su nivel de atraso, solo disponible:
+${nombre}, por su nivel de atraso:
 
-✅ *Plan 4 semanas* - $${Math.round(saldo / 4).toLocaleString('es-MX')}/semana
-✅ *Plan 8 semanas* - $${Math.round(saldo / 8).toLocaleString('es-MX')}/semana
+┌─────────────────────────
+│ 💰 Deuda: *${this.fmt(saldo)}*
+│ 📅 Atraso: *${cliente.diasAtraso} días*
+└─────────────────────────
 
-❌ Requiere *primer pago HOY* para activar convenio
-❌ Un solo pago faltante = Cancelación y acción legal
+Planes disponibles:
 
-1️⃣ Acepto, quiero convenio
-2️⃣ Hablar con asesor`;
+1️⃣  *4 pagos* — *${this.fmt(saldo / 4)}*/semana
+2️⃣  *8 pagos* — *${this.fmt(saldo / 8)}*/semana
+
+⚠️ Requiere *primer pago HOY*
+⚠️ Un pago faltante = Cancelación + acción legal
+
+4️⃣  Hablar con asesor
+
+_Responda con el número_`;
     }
 
-    return `📋 *OPCIONES DE CONVENIO*
+    return `📋 *CONVENIO DE PAGOS*
 
-✅ *Plan 4 semanas* - $${Math.round(saldo / 4).toLocaleString('es-MX')}/semana
-✅ *Plan 8 semanas* - $${Math.round(saldo / 8).toLocaleString('es-MX')}/semana
-✅ *Plan personalizado* - Según su capacidad
+${nombre}, elija el plan que mejor se ajuste:
 
-¿Desea que lo contacten?
+┌─────────────────────────
+│ 💰 Deuda total: *${this.fmt(saldo)}*
+└─────────────────────────
 
-1️⃣ Sí, que me llamen
-2️⃣ Prefiero WhatsApp
-3️⃣ Yo me comunico después`;
+1️⃣  *4 pagos*  →  *${this.fmt(saldo / 4)}*/semana
+2️⃣  *8 pagos*  →  *${this.fmt(saldo / 8)}*/semana
+3️⃣  *12 pagos*  →  *${this.fmt(saldo / 12)}*/semana
+4️⃣  Hablar con asesor
+
+_Responda con el número del plan_
+
+_Cobranza Mercantil Especializada_`;
   }
 
   msgSaldo(cliente, nivel) {
     const saldo = cliente.saldo || 0;
     const dias = cliente.diasAtraso || 0;
 
-    let advertencia = '';
+    let alerta = '';
     if (nivel === 'CRITICO') {
-      advertencia = '\n\n🚨 *CUENTA EN COBRANZA JUDICIAL*\nPague hoy para evitar demanda.';
+      alerta = '\n🚨 *CUENTA EN COBRANZA JUDICIAL*\nPague hoy para evitar demanda.';
     } else if (nivel === 'GRAVE') {
-      advertencia = '\n\n⚠️ *CUENTA EN RIESGO*\nYa fue reportado a Buró de Crédito.';
+      alerta = '\n⚠️ *CUENTA EN RIESGO*\nReportado a Buró de Crédito.';
     }
 
-    return `📊 *ESTADO DE CUENTA*
+    return `🔍 *ESTADO DE CUENTA*
 
-*Cliente:* ${cliente.nombre || 'Titular'}
-*Saldo:* $${saldo.toLocaleString('es-MX')}
-*Días de atraso:* ${dias}
-*Nivel:* ${nivel}${advertencia}
+┌─────────────────────────
+│ 👤 ${cliente.nombre || 'Titular'}
+│ 💰 Saldo: *${this.fmt(saldo)}*
+│ 📅 Atraso: *${dias} días*
+│ ⚠️ Nivel: *${nivel}*
+└─────────────────────────${alerta}
 
 ¿Qué desea hacer?
 1️⃣ Pagar ahora
+2️⃣ Hacer convenio
 4️⃣ Hablar con asesor`;
   }
 
@@ -673,12 +787,12 @@ ${nivel === 'CRITICO' || nivel === 'GRAVE' ?
 
 Responda con el *número*:
 
-1️⃣ Pagar
-2️⃣ Convenio
-3️⃣ Saldo
-4️⃣ Asesor
+1️⃣  Pagar
+2️⃣  Convenio
+3️⃣  Saldo
+4️⃣  Asesor
 
-${urgente ? '⏰ *Su caso es urgente, no demore.*' : 'O escriba *HOLA*'}`;
+${urgente ? '⏰ *Su caso es urgente, no demore.*' : 'O escriba *HOLA* para reiniciar'}`;
   }
 
   // ═══════════════════════════════════════
@@ -689,25 +803,10 @@ ${urgente ? '⏰ *Su caso es urgente, no demore.*' : 'O escriba *HOLA*'}`;
     let telefono = jid
       .replace('@s.whatsapp.net', '')
       .replace('@lid', '');
-    
     if (telefono.startsWith('52') && telefono.length === 12) {
       telefono = telefono.substring(2);
     }
-    
-    if (telefono.length > 12) {
-      return telefono;
-    }
-    
-    return telefono;
-  }
-
-  formatearTelefonoDisplay(telefono) {
-    if (telefono.length === 10) {
-      return telefono.replace(/(\d{2})(\d{4})(\d{4})/, '$1-$2-$3');
-    }
-    if (telefono.length > 10) {
-      return '...' + telefono.slice(-10);
-    }
+    if (telefono.length > 12) return telefono;
     return telefono;
   }
 
@@ -736,10 +835,7 @@ ${urgente ? '⏰ *Su caso es urgente, no demore.*' : 'O escriba *HOLA*'}`;
 
   registrarInteraccion(telefono, tipo, detalle, jidOriginal = null) {
     this.interacciones.push({ 
-      telefono, 
-      jid: jidOriginal,
-      tipo, 
-      detalle, 
+      telefono, jid: jidOriginal, tipo, detalle, 
       timestamp: new Date().toISOString() 
     });
     if (this.interacciones.length > 500) this.interacciones = this.interacciones.slice(-250);
