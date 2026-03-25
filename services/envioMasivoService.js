@@ -433,14 +433,30 @@ class EnvioMasivoService {
     const telefono = contacto.telefono;
 
     try {
-      const jid = this.whatsapp.formatearNumero(telefono);
+      // 1. Verificar número en WhatsApp y obtener JID correcto
+      let jid;
+      try {
+        const numFormateado = telefono.length === 10 ? '52' + telefono : telefono;
+        const [resultado] = await this.whatsapp.sock.onWhatsApp(numFormateado);
+        if (resultado?.exists) {
+          jid = resultado.jid;
+          console.log(`   🔍 Verificado: ${telefono} → ${jid}`);
+        } else {
+          throw new Error('Número no tiene WhatsApp');
+        }
+      } catch (verifyError) {
+        // Fallback al formato normal si onWhatsApp falla
+        if (verifyError.message === 'Número no tiene WhatsApp') throw verifyError;
+        jid = this.whatsapp.formatearNumero(telefono);
+        console.log(`   ⚠️ Sin verificar, usando: ${jid}`);
+      }
 
-      // 1. Simular presencia "en línea"
+      // 2. Simular presencia "en línea"
       try {
         await this.whatsapp.sock.sendPresenceUpdate('available');
       } catch (e) {}
 
-      // 2. Simular "escribiendo..."
+      // 3. Simular "escribiendo..."
       try {
         await this.whatsapp.sock.sendPresenceUpdate('composing', jid);
       } catch (e) {}
