@@ -142,12 +142,21 @@ app.post('/api/subir-excel', upload.single('archivo'), (req, res) => {
     }
 
     // Cargar al chatbot para que responda cuando contesten
-    const clientesChatbot = data.map(row => ({
-      nombre: row.Cliente || row.nombre || row.Nombre,
-      telefono: row.Teléfono || row.telefono || row.Telefono,
-      saldo: parseFloat(row.Saldo || row.saldo || 0),
-      diasAtraso: parseInt(row['Días Atraso'] || row.diasAtraso || 0)
-    })).filter(c => c.telefono);
+    const clientesChatbot = data.map(row => {
+      const obj = {
+        nombre: row.nombre || row.Nombre || row.Cliente || row.NOMBRE || 'Cliente',
+        telefono: row.telefono || row.Telefono || row.Teléfono || row.TELEFONO || '',
+        saldo: parseFloat(row.saldo ?? row.Saldo ?? row.SALDO ?? 0) || 0,
+        diasAtraso: parseInt(row.diasAtraso ?? row.DiasAtraso ?? row['Días Atraso'] ?? row.DIASATRASO ?? 0) || 0
+      };
+      return obj;
+    }).filter(c => c.telefono);
+    
+    // Debug: ver qué se cargó
+    if (clientesChatbot.length > 0) {
+      const ej = clientesChatbot[0];
+      console.log(`📋 Ejemplo cartera: ${ej.nombre} | tel:${ej.telefono} | saldo:${ej.saldo} | dias:${ej.diasAtraso}`);
+    }
     
     chatbot.cargarCartera(clientesChatbot);
 
