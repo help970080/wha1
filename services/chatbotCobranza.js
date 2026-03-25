@@ -119,75 +119,18 @@ class ChatBotCobranza {
         return;
       }
 
-      // === RESOLVER LID A TELÉFONO REAL ===
-      let telParaConv = telefono;
-      
-      // Check lidMap primero
-      if (this.lidMap.has(telefono)) {
-        telParaConv = this.lidMap.get(telefono);
-      } 
-      // Si es @lid y no tenemos mapeo, intentar resolver
-      else if (jid.includes('@lid')) {
-        // Método 1: msg.key.participant tiene el @s.whatsapp.net a veces
-        const participant = msg.key.participant || '';
-        if (participant.includes('@s.whatsapp.net')) {
-          const telFromParticipant = participant.replace('@s.whatsapp.net', '').replace(/^52/, '');
-          if (this.clientes.has(telFromParticipant.slice(-10))) {
-            telParaConv = telFromParticipant.slice(-10);
-            this.lidMap.set(telefono, telParaConv);
-            console.log(`🔗 Mapeado por participant: ${telefono} → ${telParaConv}`);
-          }
-        }
-        
-        // Método 2: Buscar por pushName (nombre de WhatsApp)
-        if (telParaConv === telefono) {
-          const pushName = (msg.pushName || '').trim().toLowerCase();
-          if (pushName) {
-            for (const [tel, cli] of this.clientes) {
-              const nombreCli = (cli.nombre || '').toLowerCase();
-              // Match parcial: primer nombre o nombre completo
-              if (nombreCli.includes(pushName) || pushName.includes(nombreCli.split(' ')[0])) {
-                telParaConv = tel;
-                this.lidMap.set(telefono, tel);
-                console.log(`🔗 Mapeado por pushName "${pushName}" → ${tel} (${cli.nombre})`);
-                break;
-              }
-            }
-          }
-        }
-        
-        // Método 3: Si solo hay 1 cliente con conversación activa sin mapear, es ese
-        if (telParaConv === telefono && this.clientes.size > 0) {
-          // Buscar clientes que NO tengan ya un LID asignado
-          const sinMapear = [];
-          for (const [tel, cli] of this.clientes) {
-            let yaMapeado = false;
-            for (const [, mappedTel] of this.lidMap) {
-              if (mappedTel === tel) { yaMapeado = true; break; }
-            }
-            if (!yaMapeado) sinMapear.push(tel);
-          }
-          if (sinMapear.length === 1) {
-            telParaConv = sinMapear[0];
-            this.lidMap.set(telefono, telParaConv);
-            console.log(`🔗 Mapeado por único cliente sin mapear: ${telefono} → ${telParaConv}`);
-          }
-        }
-        
-        // Debug si no se pudo mapear
-        if (telParaConv === telefono) {
-          console.log(`⚠️ LID sin mapear: ${telefono} | pushName: ${msg.pushName} | participant: ${msg.key.participant || 'N/A'}`);
-        }
-      }
+      // === RESOLVER TELÉFONO REAL ===
+      let telParaConv = this.resolverTelefono(telefono, msg);
       
       if (!texto) {
-        if (msg.message?.imageMessage && (jid.includes('@s.whatsapp.net') || jid.includes('@lid'))) {
+        if (msg.message?.imageMessage) {
           await this.manejarImagen(jid, telParaConv);
         }
         return;
       }
       
-      console.log(`📨 [${telParaConv}${telReal ? ' (LID:'+telefono+')' : ''}] ${texto.substring(0, 50)}`);
+      const mapped = telParaConv !== telefono;
+      console.log(`📨 [${telParaConv}${mapped ? ' ←LID:'+telefono : ''}] ${texto.substring(0, 50)}`);
       this.registrarInteraccion(telParaConv, 'recibido', texto, jid);
       
       const respuesta = this.generarRespuesta(telParaConv, texto);
@@ -199,6 +142,66 @@ class ChatBotCobranza {
     } catch (error) {
       console.error('❌ Error en chatbot:', error.message);
     }
+  }
+
+  /**
+   * Resuelve un teléfono/LID al teléfono real del cliente
+   */
+  resolverTelefono(telefono, msg) {
+    // 1. Directo en clientes
+    if (this.clientes.has(telefono)) return telefono;
+    
+    // 2. Por lidMap
+    if (this.lidMap.has(telefono)) return this.lidMap.get(telefono);
+    
+    // 3. Últimos 10 dígitos
+    const tel10 = telefono.replace(/\D/g, '').slice(-10);
+    if (this.clientes.has(tel10)) {
+      this.lidMap.set(telefono, tel10);
+      return tel10;
+    }
+    
+    // 4. Con prefijo 52
+    if (this.clientes.has('52' + tel10)) {
+      this.lidMap.set(telefono, '52' + tel10);
+      return '52' + tel10;
+    }
+    
+    // 5. Si es un LID (@lid), intentar resolver por contexto
+    const pushName = (msg?.pushName || '').trim().toLowerCase();
+    
+    // 5a. Match por pushName contra nombres de clientes
+    if (pushName && pushName.length >= 3) {
+      for (const [tel, cli] of this.clientes) {
+        const parts = (cli.nombre || '').toLowerCase().split(' ');
+        for (const part of parts) {
+          if (part.length >= 3 && (pushName.includes(part) || part.includes(pushName))) {
+            this.lidMap.set(telefono, tel);
+            console.log(`🔗 Match pushName "${pushName}" ↔ "${cli.nombre}" → ${tel}`);
+            return tel;
+          }
+        }
+      }
+    }
+    
+    // 5b. Si solo hay UN cliente sin LID asignado, asignar
+    const clientesSinLid = [];
+    for (const [tel] of this.clientes) {
+      let asignado = false;
+      for (const [, v] of this.lidMap) {
+        if (v === tel) { asignado = true; break; }
+      }
+      if (!asignado) clientesSinLid.push(tel);
+    }
+    if (clientesSinLid.length === 1) {
+      this.lidMap.set(telefono, clientesSinLid[0]);
+      console.log(`🔗 Único cliente sin LID: ${telefono} → ${clientesSinLid[0]}`);
+      return clientesSinLid[0];
+    }
+    
+    // 6. No se pudo resolver — responder como cliente genérico
+    console.log(`⚠️ Sin resolver: LID=${telefono} pushName="${pushName}" clientes=${this.clientes.size}`);
+    return telefono;
   }
 
   generarRespuesta(telefono, texto) {
