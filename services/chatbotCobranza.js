@@ -119,25 +119,66 @@ class ChatBotCobranza {
         return;
       }
 
-      // Si viene de @lid, intentar resolver el teléfono real
-      if (jid.includes('@lid') && !this.lidMap.has(telefono)) {
-        // Intentar obtener el teléfono del participant o del pushName
-        // y mapear buscando en clientes cargados por nombre
-        const pushName = msg.pushName || '';
-        if (pushName) {
-          for (const [tel, cli] of this.clientes) {
-            if (cli.nombre && cli.nombre.toLowerCase().includes(pushName.toLowerCase().split(' ')[0])) {
-              this.mapearLid(telefono, tel);
-              console.log(`🔗 Auto-mapeado por nombre: ${pushName} → ${tel}`);
-              break;
+      // === RESOLVER LID A TELÉFONO REAL ===
+      let telParaConv = telefono;
+      
+      // Check lidMap primero
+      if (this.lidMap.has(telefono)) {
+        telParaConv = this.lidMap.get(telefono);
+      } 
+      // Si es @lid y no tenemos mapeo, intentar resolver
+      else if (jid.includes('@lid')) {
+        // Método 1: msg.key.participant tiene el @s.whatsapp.net a veces
+        const participant = msg.key.participant || '';
+        if (participant.includes('@s.whatsapp.net')) {
+          const telFromParticipant = participant.replace('@s.whatsapp.net', '').replace(/^52/, '');
+          if (this.clientes.has(telFromParticipant.slice(-10))) {
+            telParaConv = telFromParticipant.slice(-10);
+            this.lidMap.set(telefono, telParaConv);
+            console.log(`🔗 Mapeado por participant: ${telefono} → ${telParaConv}`);
+          }
+        }
+        
+        // Método 2: Buscar por pushName (nombre de WhatsApp)
+        if (telParaConv === telefono) {
+          const pushName = (msg.pushName || '').trim().toLowerCase();
+          if (pushName) {
+            for (const [tel, cli] of this.clientes) {
+              const nombreCli = (cli.nombre || '').toLowerCase();
+              // Match parcial: primer nombre o nombre completo
+              if (nombreCli.includes(pushName) || pushName.includes(nombreCli.split(' ')[0])) {
+                telParaConv = tel;
+                this.lidMap.set(telefono, tel);
+                console.log(`🔗 Mapeado por pushName "${pushName}" → ${tel} (${cli.nombre})`);
+                break;
+              }
             }
           }
         }
+        
+        // Método 3: Si solo hay 1 cliente con conversación activa sin mapear, es ese
+        if (telParaConv === telefono && this.clientes.size > 0) {
+          // Buscar clientes que NO tengan ya un LID asignado
+          const sinMapear = [];
+          for (const [tel, cli] of this.clientes) {
+            let yaMapeado = false;
+            for (const [, mappedTel] of this.lidMap) {
+              if (mappedTel === tel) { yaMapeado = true; break; }
+            }
+            if (!yaMapeado) sinMapear.push(tel);
+          }
+          if (sinMapear.length === 1) {
+            telParaConv = sinMapear[0];
+            this.lidMap.set(telefono, telParaConv);
+            console.log(`🔗 Mapeado por único cliente sin mapear: ${telefono} → ${telParaConv}`);
+          }
+        }
+        
+        // Debug si no se pudo mapear
+        if (telParaConv === telefono) {
+          console.log(`⚠️ LID sin mapear: ${telefono} | pushName: ${msg.pushName} | participant: ${msg.key.participant || 'N/A'}`);
+        }
       }
-      
-      // Si hay mapeo LID, usar el teléfono real para la conversación
-      const telReal = this.lidMap.get(telefono);
-      const telParaConv = telReal || telefono;
       
       if (!texto) {
         if (msg.message?.imageMessage && (jid.includes('@s.whatsapp.net') || jid.includes('@lid'))) {
