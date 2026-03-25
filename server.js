@@ -45,8 +45,8 @@ app.use(express.json({ limit: '50mb' }));
 // ═══════════════════════════════════════════════════════════
 
 const whatsappService = new WhatsAppService();
-const envioMasivoService = new EnvioMasivoService(whatsappService);
 const chatbot = new ChatBotCobranza(whatsappService);
+const envioMasivoService = new EnvioMasivoService(whatsappService, chatbot);
 
 let chatbotIniciado = false;
 
