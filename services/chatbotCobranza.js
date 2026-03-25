@@ -45,6 +45,7 @@ class ChatBotCobranza {
     // Datos en memoria
     this.clientes = new Map();
     this.conversaciones = new Map();
+    this.lidMap = new Map(); // LID → teléfono real
     this.interacciones = [];
     
     // Estados
@@ -111,28 +112,48 @@ class ChatBotCobranza {
       if (msg.message?.protocolMessage) return;
       if (msg.message?.reactionMessage) return;
       
-      const telefono = this.extraerTelefono(jid);
+      let telefono = this.extraerTelefono(jid);
       const texto = this.extraerTexto(msg);
       
       if (!jid.includes('@s.whatsapp.net') && !jid.includes('@lid')) {
         return;
       }
+
+      // Si viene de @lid, intentar resolver el teléfono real
+      if (jid.includes('@lid') && !this.lidMap.has(telefono)) {
+        // Intentar obtener el teléfono del participant o del pushName
+        // y mapear buscando en clientes cargados por nombre
+        const pushName = msg.pushName || '';
+        if (pushName) {
+          for (const [tel, cli] of this.clientes) {
+            if (cli.nombre && cli.nombre.toLowerCase().includes(pushName.toLowerCase().split(' ')[0])) {
+              this.mapearLid(telefono, tel);
+              console.log(`🔗 Auto-mapeado por nombre: ${pushName} → ${tel}`);
+              break;
+            }
+          }
+        }
+      }
+      
+      // Si hay mapeo LID, usar el teléfono real para la conversación
+      const telReal = this.lidMap.get(telefono);
+      const telParaConv = telReal || telefono;
       
       if (!texto) {
-        if (msg.message?.imageMessage && jid.includes('@s.whatsapp.net')) {
-          await this.manejarImagen(jid, telefono);
+        if (msg.message?.imageMessage && (jid.includes('@s.whatsapp.net') || jid.includes('@lid'))) {
+          await this.manejarImagen(jid, telParaConv);
         }
         return;
       }
       
-      console.log(`📨 [${telefono}] ${texto.substring(0, 50)}`);
-      this.registrarInteraccion(telefono, 'recibido', texto, jid);
+      console.log(`📨 [${telParaConv}${telReal ? ' (LID:'+telefono+')' : ''}] ${texto.substring(0, 50)}`);
+      this.registrarInteraccion(telParaConv, 'recibido', texto, jid);
       
-      const respuesta = this.generarRespuesta(telefono, texto);
+      const respuesta = this.generarRespuesta(telParaConv, texto);
       
       if (respuesta) {
         await this.whatsapp.sock.sendMessage(jid, { text: respuesta });
-        this.registrarInteraccion(telefono, 'enviado', respuesta.substring(0, 50), jid);
+        this.registrarInteraccion(telParaConv, 'enviado', respuesta.substring(0, 50), jid);
       }
     } catch (error) {
       console.error('❌ Error en chatbot:', error.message);
@@ -822,27 +843,41 @@ ${urgente ? '⏰ *Su caso es urgente, no demore.*' : 'O escriba *HOLA* para rein
   }
 
   obtenerCliente(telefono) {
-    // Buscar con el teléfono tal cual
+    // 1. Buscar directo
     let cliente = this.clientes.get(telefono);
     if (cliente) return cliente;
     
-    // Buscar con últimos 10 dígitos
+    // 2. Buscar por mapeo LID → teléfono real
+    const telReal = this.lidMap.get(telefono);
+    if (telReal) {
+      cliente = this.clientes.get(telReal);
+      if (cliente) return cliente;
+    }
+    
+    // 3. Buscar con últimos 10 dígitos
     const tel10 = telefono.replace(/\D/g, '').slice(-10);
     cliente = this.clientes.get(tel10);
     if (cliente) return cliente;
     
-    // Buscar con 52 + teléfono
+    // 4. Buscar con 52 + teléfono
     cliente = this.clientes.get('52' + tel10);
     if (cliente) return cliente;
     
-    // Buscar recorriendo todos los clientes (fallback)
+    // 5. Buscar recorriendo todos
     for (const [key, val] of this.clientes) {
       const keyClean = key.replace(/\D/g, '').slice(-10);
       if (keyClean === tel10) return val;
     }
     
-    console.log(`⚠️ Cliente no encontrado: ${telefono} (tel10: ${tel10}, clientes: ${this.clientes.size})`);
+    console.log(`⚠️ Cliente no encontrado: ${telefono} (lidMap: ${this.lidMap.has(telefono) ? 'sí' : 'no'}, clientes: ${this.clientes.size})`);
     return { telefono, nombre: 'Cliente', saldo: 0, diasAtraso: 0 };
+  }
+
+  // Mapear un LID a un teléfono real de cliente
+  mapearLid(lid, telefonoReal) {
+    const tel10 = telefonoReal.replace(/\D/g, '').slice(-10);
+    this.lidMap.set(lid, tel10);
+    console.log(`🔗 Mapeado LID ${lid} → ${tel10}`);
   }
 
   obtenerConversacion(telefono) {
@@ -878,11 +913,34 @@ ${urgente ? '⏰ *Su caso es urgente, no demore.*' : 'O escriba *HOLA* para rein
     });
     this.guardarDatos();
     console.log(`✅ ${clientes.length} clientes cargados en chatbot`);
-    // Debug completo
     for (const [tel, cli] of this.clientes) {
       console.log(`   📋 ${cli.nombre} | tel:${tel} | saldo:${cli.saldo} | dias:${cli.diasAtraso}`);
     }
+    
+    // Pre-mapear LIDs usando onWhatsApp (async, en background)
+    this._premapearLids();
+    
     return this.clientes.size;
+  }
+
+  async _premapearLids() {
+    if (!this.whatsapp?.sock || !this.whatsapp.isConnected()) return;
+    
+    console.log('🔗 Pre-mapeando LIDs...');
+    for (const [tel, cli] of this.clientes) {
+      try {
+        const num = tel.length === 10 ? '52' + tel : tel;
+        const [resultado] = await this.whatsapp.sock.onWhatsApp(num);
+        if (resultado?.exists && resultado.jid) {
+          const lid = resultado.jid.replace('@s.whatsapp.net', '').replace('@lid', '');
+          this.lidMap.set(lid, tel);
+          console.log(`   🔗 ${cli.nombre}: ${lid} → ${tel}`);
+        }
+      } catch (e) {}
+      // Pequeño delay para no saturar
+      await new Promise(r => setTimeout(r, 500));
+    }
+    console.log(`🔗 LIDs mapeados: ${this.lidMap.size}`);
   }
 
   cargarDatos() {
