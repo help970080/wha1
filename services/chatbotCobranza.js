@@ -166,40 +166,43 @@ class ChatBotCobranza {
       this.lidMap.set(telefono, '52' + tel10);
       return '52' + tel10;
     }
+
+    // 5. Si solo hay 1 cliente, ES ESE. No hay vuelta.
+    if (this.clientes.size === 1) {
+      const unicoTel = [...this.clientes.keys()][0];
+      this.lidMap.set(telefono, unicoTel);
+      console.log(`🔗 Auto: único cliente ${telefono} → ${unicoTel}`);
+      return unicoTel;
+    }
     
-    // 5. Si es un LID (@lid), intentar resolver por contexto
+    // 6. Buscar por pushName
     const pushName = (msg?.pushName || '').trim().toLowerCase();
-    
-    // 5a. Match por pushName contra nombres de clientes
     if (pushName && pushName.length >= 3) {
       for (const [tel, cli] of this.clientes) {
         const parts = (cli.nombre || '').toLowerCase().split(' ');
         for (const part of parts) {
           if (part.length >= 3 && (pushName.includes(part) || part.includes(pushName))) {
             this.lidMap.set(telefono, tel);
-            console.log(`🔗 Match pushName "${pushName}" ↔ "${cli.nombre}" → ${tel}`);
+            console.log(`🔗 Match nombre "${pushName}" → ${tel}`);
             return tel;
           }
         }
       }
     }
     
-    // 5b. Si solo hay UN cliente sin LID asignado, asignar
-    const clientesSinLid = [];
+    // 7. Buscar cliente sin LID asignado
     for (const [tel] of this.clientes) {
       let asignado = false;
       for (const [, v] of this.lidMap) {
         if (v === tel) { asignado = true; break; }
       }
-      if (!asignado) clientesSinLid.push(tel);
-    }
-    if (clientesSinLid.length === 1) {
-      this.lidMap.set(telefono, clientesSinLid[0]);
-      console.log(`🔗 Único cliente sin LID: ${telefono} → ${clientesSinLid[0]}`);
-      return clientesSinLid[0];
+      if (!asignado) {
+        this.lidMap.set(telefono, tel);
+        console.log(`🔗 Cliente sin LID: ${telefono} → ${tel}`);
+        return tel;
+      }
     }
     
-    // 6. No se pudo resolver — responder como cliente genérico
     console.log(`⚠️ Sin resolver: LID=${telefono} pushName="${pushName}" clientes=${this.clientes.size}`);
     return telefono;
   }
@@ -308,7 +311,7 @@ class ChatBotCobranza {
 
   manejarExcusa(telefono, texto, cliente, nivel) {
     this.guardarConversacion(telefono, this.ESTADOS.EXCUSAS);
-    const saldo = cliente.saldo || 0;
+    const saldo = cliente.saldo ?? 0;
     const dias = cliente.diasAtraso || 0;
     const nombre = cliente.nombre?.split(' ')[0] || 'Cliente';
 
@@ -420,7 +423,7 @@ _No responder = Aceptar consecuencias_`;
   }
 
   manejarNegativa(telefono, cliente, nivel) {
-    const saldo = cliente.saldo || 0;
+    const saldo = cliente.saldo ?? 0;
     const dias = cliente.diasAtraso || 0;
 
     this.conectarGestor(telefono, cliente, '🚨 CLIENTE NEGADO A PAGAR');
@@ -515,7 +518,8 @@ _Cobranza Mercantil Especializada_`;
   }
 
   procesarConvenio(telefono, texto, cliente, nivel) {
-    const saldo = cliente.saldo || 0;
+    const saldo = cliente.saldo ?? 0;
+    console.log(`🔎 CONVENIO DEBUG: tel=${telefono} nombre=${cliente.nombre} saldo=${cliente.saldo} saldoVar=${saldo} tipo=${typeof cliente.saldo}`);
     
     switch (texto) {
       case '1': {
@@ -615,7 +619,7 @@ _Cobranza Mercantil Especializada_`;
 ┌─────────────────────────
 │ 👤 *${cliente.nombre || 'No registrado'}*
 │ 📱 ${telefono}
-│ 💰 ${this.fmt(cliente.saldo || 0)}
+│ 💰 ${this.fmt(cliente.saldo ?? 0)}
 │ 📅 ${cliente.diasAtraso || 'N/A'} días — ${nivel}
 └─────────────────────────
 
@@ -679,7 +683,7 @@ _Cobranza Mercantil Especializada_`
 
   msgBienvenida(cliente, nivel) {
     const nombre = cliente.nombre?.split(' ')[0] || 'Cliente';
-    const saldo = cliente.saldo || 0;
+    const saldo = cliente.saldo ?? 0;
     const dias = cliente.diasAtraso || 0;
 
     let header, info;
@@ -719,7 +723,7 @@ _Cobranza Mercantil Especializada_`;
   }
 
   msgOpcionesPago(cliente, nivel) {
-    const saldo = cliente.saldo || 0;
+    const saldo = cliente.saldo ?? 0;
 
     return `💳 *OPCIONES DE PAGO*
 
@@ -736,7 +740,7 @@ _Responda con el número_`;
   }
 
   msgPagoTotal(cliente, nivel) {
-    const saldo = cliente.saldo || 0;
+    const saldo = cliente.saldo ?? 0;
     const nombre = cliente.nombre?.split(' ')[0] || 'Cliente';
 
     return `🎉 *¡EXCELENTE DECISIÓN, ${nombre}!*
@@ -755,7 +759,7 @@ _Cobranza Mercantil Especializada_`;
   }
 
   msgPagoParcial(cliente, nivel) {
-    const saldo = cliente.saldo || 0;
+    const saldo = cliente.saldo ?? 0;
     const minimo = nivel === 'CRITICO' ? Math.round(saldo * 0.3) : nivel === 'GRAVE' ? Math.round(saldo * 0.25) : Math.round(saldo * 0.15);
 
     return `💵 *PAGO PARCIAL*
@@ -775,8 +779,9 @@ _Cobranza Mercantil Especializada_`;
   }
 
   msgConvenio(cliente, nivel) {
-    const saldo = cliente.saldo || 0;
+    const saldo = cliente.saldo ?? 0;
     const nombre = cliente.nombre?.split(' ')[0] || 'Cliente';
+    console.log(`🔎 MSG_CONVENIO: nombre=${nombre} saldo=${saldo} clienteSaldo=${cliente.saldo} tipo=${typeof cliente.saldo}`);
 
     if (nivel === 'CRITICO') {
       return `📋 *CONVENIO — ÚLTIMA OPORTUNIDAD*
@@ -820,7 +825,7 @@ _Cobranza Mercantil Especializada_`;
   }
 
   msgSaldo(cliente, nivel) {
-    const saldo = cliente.saldo || 0;
+    const saldo = cliente.saldo ?? 0;
     const dias = cliente.diasAtraso || 0;
 
     let alerta = '';
