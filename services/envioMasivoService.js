@@ -475,6 +475,7 @@ class EnvioMasivoService {
         ]);
       };
 
+      let sendResult;
       if (imagen) {
         const caption = plantilla ? this.personalizarMensaje(plantilla, contacto) : '';
         
@@ -492,13 +493,13 @@ class EnvioMasivoService {
           mediaContent = fs.readFileSync(imagen);
         }
 
-        await enviarConTimeout({
+        sendResult = await enviarConTimeout({
           image: mediaContent,
           caption: caption,
         });
       } else {
         const mensaje = this.personalizarMensaje(plantilla, contacto);
-        await enviarConTimeout({ text: mensaje });
+        sendResult = await enviarConTimeout({ text: mensaje });
       }
 
       // 4. Volver a "paused" (no disponible constantemente)
@@ -514,13 +515,25 @@ class EnvioMasivoService {
       this.stats.ultimoEnvio = Date.now();
       this.config.enviadosHoy++;
 
-      // Mapear LID ↔ teléfono para que el chatbot encuentre al cliente cuando responda
-      // El JID puede ser @s.whatsapp.net o @lid
+      // Mapear TODOS los IDs posibles al teléfono real
       if (this.chatbot) {
-        const lidClean = jid.replace('@s.whatsapp.net', '').replace('@lid', '');
-        this.chatbot.mapearLid(lidClean, telefono);
-        // También mapear el JID completo sin @
-        this.chatbot.mapearLid(jid.split('@')[0], telefono);
+        // El JID que usamos para enviar (normalmente @s.whatsapp.net)
+        const jidClean = jid.replace('@s.whatsapp.net', '').replace('@lid', '');
+        this.chatbot.mapearLid(jidClean, telefono);
+        
+        // El remoteJid de la respuesta (puede ser LID)
+        if (sendResult?.key?.remoteJid) {
+          const responseJid = sendResult.key.remoteJid;
+          const responseClean = responseJid.replace('@s.whatsapp.net', '').replace('@lid', '');
+          this.chatbot.mapearLid(responseClean, telefono);
+          console.log(`   🔗 Mapeado: ${responseClean} → ${telefono}`);
+        }
+        
+        // El participant si existe
+        if (sendResult?.key?.participant) {
+          const partClean = sendResult.key.participant.replace('@s.whatsapp.net', '').replace('@lid', '');
+          this.chatbot.mapearLid(partClean, telefono);
+        }
       }
 
       // Calcular velocidad y tiempo estimado
