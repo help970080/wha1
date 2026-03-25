@@ -8,6 +8,7 @@
  * - Envío masivo controlado (anti-baneo)
  * - ChatBot automático de respuestas
  * - Notificación a gestores
+ * - Panel de control web
  * - API REST completa
  * 
  * Gestores:
@@ -20,6 +21,8 @@ const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
 const XLSX = require('xlsx');
+const path = require('path');
+const fs = require('fs');
 
 const WhatsAppService = require('./services/whatsappServiceBaileys');
 const EnvioMasivoService = require('./services/envioMasivoService');
@@ -28,7 +31,11 @@ const ChatBotCobranza = require('./services/chatbotCobranza');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const upload = multer({ storage: multer.memoryStorage() });
+// Multer para archivos (Excel + imágenes)
+const upload = multer({ 
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 } // 10MB
+});
 
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
@@ -88,6 +95,7 @@ app.get('/api/estado', async (req, res) => {
       conectado: whatsappService.isConnected(),
       info: await whatsappService.getInfoSesion(),
       estadisticasEnvio: envioMasivoService.getEstadisticas(),
+      progreso: envioMasivoService.getProgreso(),
       chatbot: chatbot.getEstadisticas()
     });
   } catch (error) {
@@ -115,22 +123,10 @@ app.post('/api/desconectar', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// RUTAS DE ENVÍO
+// RUTAS DE ENVÍO MASIVO (NUEVO)
 // ═══════════════════════════════════════════════════════════
 
-app.post('/api/enviar-mensaje', async (req, res) => {
-  try {
-    const { telefono, mensaje } = req.body;
-    if (!telefono || !mensaje) {
-      return res.status(400).json({ exito: false, mensaje: 'Faltan telefono y mensaje' });
-    }
-    const resultado = await whatsappService.enviarMensaje(telefono, mensaje);
-    res.json(resultado);
-  } catch (error) {
-    res.status(500).json({ exito: false, mensaje: error.message });
-  }
-});
-
+// Subir Excel y previsualizar
 app.post('/api/subir-excel', upload.single('archivo'), (req, res) => {
   try {
     if (!req.file) {
@@ -145,7 +141,7 @@ app.post('/api/subir-excel', upload.single('archivo'), (req, res) => {
       return res.status(400).json({ exito: false, mensaje: 'Archivo vacío' });
     }
 
-    // Cargar al chatbot
+    // Cargar al chatbot para que responda cuando contesten
     const clientesChatbot = data.map(row => ({
       nombre: row.Cliente || row.nombre || row.Nombre,
       telefono: row.Teléfono || row.telefono || row.Telefono,
@@ -168,6 +164,93 @@ app.post('/api/subir-excel', upload.single('archivo'), (req, res) => {
   }
 });
 
+// Iniciar campaña masiva
+app.post('/api/campana/iniciar', upload.single('imagen'), async (req, res) => {
+  try {
+    let { contactos, plantilla, nombreCampana, config } = req.body;
+
+    // Parse JSON strings (vienen del FormData)
+    if (typeof contactos === 'string') contactos = JSON.parse(contactos);
+    if (typeof config === 'string') config = JSON.parse(config);
+
+    // Imagen si viene
+    let imagen = null;
+    if (req.file) {
+      imagen = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
+    } else if (req.body.imagenBase64) {
+      imagen = req.body.imagenBase64;
+    } else if (req.body.imagenUrl) {
+      imagen = req.body.imagenUrl;
+    }
+
+    const resultado = await envioMasivoService.iniciarCampana({
+      contactos,
+      plantilla,
+      imagen,
+      nombreCampana,
+      config,
+    });
+
+    res.json(resultado);
+  } catch (error) {
+    res.status(500).json({ exito: false, mensaje: error.message });
+  }
+});
+
+// Pausar campaña
+app.post('/api/campana/pausar', (req, res) => {
+  const ok = envioMasivoService.pausar();
+  res.json({ exito: ok, mensaje: ok ? 'Campaña pausada' : 'No hay campaña activa o ya está pausada' });
+});
+
+// Reanudar campaña
+app.post('/api/campana/reanudar', (req, res) => {
+  const ok = envioMasivoService.reanudar();
+  res.json({ exito: ok, mensaje: ok ? 'Campaña reanudada' : 'No hay campaña pausada' });
+});
+
+// Cancelar campaña
+app.post('/api/campana/cancelar', (req, res) => {
+  const ok = envioMasivoService.cancelar();
+  res.json({ exito: ok, mensaje: ok ? 'Campaña cancelada' : 'No hay campaña activa' });
+});
+
+// Progreso en tiempo real
+app.get('/api/campana/progreso', (req, res) => {
+  res.json(envioMasivoService.getProgreso());
+});
+
+// Detalle de la cola
+app.get('/api/campana/detalle', (req, res) => {
+  res.json(envioMasivoService.getDetalleCola());
+});
+
+// Estadísticas completas
+app.get('/api/campana/estadisticas', (req, res) => {
+  res.json(envioMasivoService.getEstadisticas());
+});
+
+// Actualizar configuración de delays
+app.post('/api/campana/config', (req, res) => {
+  const config = envioMasivoService.actualizarConfig(req.body);
+  res.json({ exito: true, config });
+});
+
+// Enviar mensaje individual (test)
+app.post('/api/enviar-mensaje', async (req, res) => {
+  try {
+    const { telefono, mensaje } = req.body;
+    if (!telefono || !mensaje) {
+      return res.status(400).json({ exito: false, mensaje: 'Faltan telefono y mensaje' });
+    }
+    const resultado = await whatsappService.enviarMensaje(telefono, mensaje);
+    res.json(resultado);
+  } catch (error) {
+    res.status(500).json({ exito: false, mensaje: error.message });
+  }
+});
+
+// Compatibilidad con envío masivo viejo
 app.post('/api/enviar-masivo', async (req, res) => {
   try {
     const { contactos, plantilla, columnaTeléfono } = req.body;
@@ -176,7 +259,6 @@ app.post('/api/enviar-masivo', async (req, res) => {
       return res.status(400).json({ exito: false, mensaje: 'Faltan contactos o plantilla' });
     }
 
-    // Cargar al chatbot para que responda
     const clientesChatbot = contactos.map(c => ({
       nombre: c.Cliente || c.nombre,
       telefono: c[columnaTeléfono] || c.telefono,
@@ -185,7 +267,6 @@ app.post('/api/enviar-masivo', async (req, res) => {
     }));
     chatbot.cargarCartera(clientesChatbot);
 
-    // Iniciar envío en background
     envioMasivoService.enviarMasivoFlexible(contactos, plantilla, columnaTeléfono);
 
     res.json({
@@ -249,16 +330,12 @@ app.post('/api/chatbot/gestores', (req, res) => {
 // EXPORTAR A EXCEL
 // ═══════════════════════════════════════════════════════════
 
-// Exportar interacciones a Excel
 app.get('/api/exportar/interacciones', (req, res) => {
   try {
     const interacciones = chatbot.getInteracciones(500);
-    
     if (interacciones.length === 0) {
       return res.status(404).json({ error: 'No hay interacciones para exportar' });
     }
-    
-    // Formatear datos para Excel
     const datos = interacciones.map(i => ({
       'Fecha': new Date(i.timestamp).toLocaleDateString('es-MX'),
       'Hora': new Date(i.timestamp).toLocaleTimeString('es-MX'),
@@ -266,117 +343,77 @@ app.get('/api/exportar/interacciones', (req, res) => {
       'Tipo': i.tipo,
       'Detalle': i.detalle
     }));
-    
     const ws = XLSX.utils.json_to_sheet(datos);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Interacciones');
-    
-    // Ajustar anchos de columna
-    ws['!cols'] = [
-      { wch: 12 }, // Fecha
-      { wch: 10 }, // Hora
-      { wch: 15 }, // Teléfono
-      { wch: 15 }, // Tipo
-      { wch: 50 }  // Detalle
-    ];
-    
+    ws['!cols'] = [{ wch: 12 }, { wch: 10 }, { wch: 15 }, { wch: 15 }, { wch: 50 }];
     const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
-    
     const fecha = new Date().toISOString().split('T')[0];
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename=Interacciones_${fecha}.xlsx`);
     res.send(buffer);
-    
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Exportar conversaciones activas a Excel
 app.get('/api/exportar/conversaciones', (req, res) => {
   try {
     const conversaciones = chatbot.getConversaciones();
-    
     if (conversaciones.length === 0) {
       return res.status(404).json({ error: 'No hay conversaciones activas' });
     }
-    
     const datos = conversaciones.map(c => ({
       'Teléfono': c.telefono,
       'Estado': c.estado,
       'Gestor Asignado': c.gestor?.nombre || 'N/A',
       'Última Actividad': c.timestamp ? new Date(c.timestamp).toLocaleString('es-MX') : 'N/A'
     }));
-    
     const ws = XLSX.utils.json_to_sheet(datos);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Conversaciones');
-    
-    ws['!cols'] = [
-      { wch: 15 },
-      { wch: 20 },
-      { wch: 20 },
-      { wch: 20 }
-    ];
-    
+    ws['!cols'] = [{ wch: 15 }, { wch: 20 }, { wch: 20 }, { wch: 20 }];
     const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
-    
     const fecha = new Date().toISOString().split('T')[0];
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename=Conversaciones_${fecha}.xlsx`);
     res.send(buffer);
-    
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Exportar clientes cargados a Excel
 app.get('/api/exportar/clientes', (req, res) => {
   try {
     const clientes = [...chatbot.clientes.values()];
-    
     if (clientes.length === 0) {
       return res.status(404).json({ error: 'No hay clientes cargados' });
     }
-    
     const datos = clientes.map(c => ({
       'Nombre': c.nombre || 'N/A',
       'Teléfono': c.telefono || 'N/A',
       'Saldo': c.saldo || 0,
       'Días Atraso': c.diasAtraso || 0
     }));
-    
     const ws = XLSX.utils.json_to_sheet(datos);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Clientes');
-    
-    ws['!cols'] = [
-      { wch: 30 },
-      { wch: 15 },
-      { wch: 12 },
-      { wch: 12 }
-    ];
-    
+    ws['!cols'] = [{ wch: 30 }, { wch: 15 }, { wch: 12 }, { wch: 12 }];
     const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
-    
     const fecha = new Date().toISOString().split('T')[0];
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename=Clientes_Bot_${fecha}.xlsx`);
     res.send(buffer);
-    
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Reporte completo (interacciones + resumen)
 app.get('/api/exportar/reporte', (req, res) => {
   try {
     const wb = XLSX.utils.book_new();
     const fecha = new Date().toISOString().split('T')[0];
     
-    // Hoja 1: Resumen
     const stats = chatbot.getEstadisticas();
     const resumen = [
       { 'Métrica': 'Clientes Registrados', 'Valor': stats.clientesRegistrados },
@@ -389,7 +426,6 @@ app.get('/api/exportar/reporte', (req, res) => {
     wsResumen['!cols'] = [{ wch: 25 }, { wch: 20 }];
     XLSX.utils.book_append_sheet(wb, wsResumen, 'Resumen');
     
-    // Hoja 2: Interacciones
     const interacciones = chatbot.getInteracciones(500).map(i => ({
       'Fecha': new Date(i.timestamp).toLocaleDateString('es-MX'),
       'Hora': new Date(i.timestamp).toLocaleTimeString('es-MX'),
@@ -403,7 +439,6 @@ app.get('/api/exportar/reporte', (req, res) => {
       XLSX.utils.book_append_sheet(wb, wsInter, 'Interacciones');
     }
     
-    // Hoja 3: Conversaciones
     const conversaciones = chatbot.getConversaciones().map(c => ({
       'Teléfono': c.telefono,
       'Estado': c.estado,
@@ -416,7 +451,6 @@ app.get('/api/exportar/reporte', (req, res) => {
       XLSX.utils.book_append_sheet(wb, wsConv, 'Conversaciones');
     }
     
-    // Hoja 4: Gestores
     const gestores = stats.gestores.map(g => ({
       'Nombre': g.nombre,
       'Teléfono': g.telefono,
@@ -426,19 +460,31 @@ app.get('/api/exportar/reporte', (req, res) => {
     wsGest['!cols'] = [{ wch: 20 }, { wch: 15 }, { wch: 10 }];
     XLSX.utils.book_append_sheet(wb, wsGest, 'Gestores');
     
-    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    // Hoja 5: Resultados de campaña masiva
+    const detalleCola = envioMasivoService.getDetalleCola();
+    if (detalleCola.length > 0) {
+      const wsCamp = XLSX.utils.json_to_sheet(detalleCola.map(d => ({
+        'Nombre': d.nombre,
+        'Teléfono': d.telefono,
+        'Estado': d.estado,
+        'Error': d.error || '',
+        'Enviado': d.enviadoEn || ''
+      })));
+      wsCamp['!cols'] = [{ wch: 25 }, { wch: 15 }, { wch: 12 }, { wch: 30 }, { wch: 20 }];
+      XLSX.utils.book_append_sheet(wb, wsCamp, 'Campaña Masiva');
+    }
     
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename=Reporte_ChatBot_${fecha}.xlsx`);
     res.send(buffer);
-    
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
 // ═══════════════════════════════════════════════════════════
-// HEALTH CHECK (para Render/UptimeRobot)
+// HEALTH CHECK
 // ═══════════════════════════════════════════════════════════
 
 app.get('/health', (req, res) => {
@@ -446,210 +492,19 @@ app.get('/health', (req, res) => {
     status: 'ok', 
     whatsapp: whatsappService.isConnected(),
     chatbot: chatbot.activo,
+    envioMasivo: envioMasivoService.getProgreso(),
     timestamp: new Date().toISOString()
   });
 });
 
-app.get('/ping', (req, res) => {
-  res.send('pong');
-});
+app.get('/ping', (req, res) => res.send('pong'));
 
 // ═══════════════════════════════════════════════════════════
-// INTERFAZ WEB
+// INTERFAZ WEB — PANEL DE CONTROL
 // ═══════════════════════════════════════════════════════════
 
 app.get('/', (req, res) => {
-  res.send(`<!DOCTYPE html>
-<html>
-<head>
-  <title>CelExpress WhatsApp + ChatBot</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: -apple-system, sans-serif; background: #1F4E79; min-height: 100vh; padding: 20px; }
-    .container { max-width: 800px; margin: 0 auto; }
-    h1 { color: white; text-align: center; margin-bottom: 20px; }
-    .card { background: white; border-radius: 15px; padding: 25px; margin-bottom: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); }
-    .card h2 { color: #1F4E79; margin-bottom: 15px; }
-    .status { padding: 15px; border-radius: 10px; text-align: center; font-weight: bold; margin-bottom: 15px; }
-    .status.ok { background: #d4edda; color: #155724; }
-    .status.error { background: #f8d7da; color: #721c24; }
-    .status.loading { background: #fff3cd; color: #856404; }
-    .btn { padding: 12px 25px; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; margin: 5px; }
-    .btn-primary { background: #1F4E79; color: white; }
-    .btn-success { background: #28a745; color: white; }
-    .btn-danger { background: #dc3545; color: white; }
-    .qr-container { text-align: center; padding: 20px; }
-    .qr-container img { max-width: 250px; border-radius: 10px; }
-    .stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; }
-    .stat { background: #f8f9fa; padding: 20px; border-radius: 10px; text-align: center; }
-    .stat h3 { font-size: 2rem; color: #1F4E79; }
-    .stat p { color: #666; font-size: 0.9rem; }
-    .gestores { margin-top: 15px; }
-    .gestor { background: #e8f4fd; padding: 10px 15px; border-radius: 8px; margin: 5px 0; display: flex; justify-content: space-between; }
-    .log { background: #f8f9fa; border-radius: 10px; padding: 15px; max-height: 200px; overflow-y: auto; font-family: monospace; font-size: 0.85rem; }
-    .log-item { padding: 5px 0; border-bottom: 1px solid #eee; }
-    .footer { text-align: center; color: rgba(255,255,255,0.7); margin-top: 20px; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h1>🤖 CelExpress WhatsApp + ChatBot</h1>
-    
-    <div class="card">
-      <h2>📱 Estado de WhatsApp</h2>
-      <div class="status loading" id="status">Verificando conexión...</div>
-      <div id="qrArea"></div>
-      <div style="text-align:center;">
-        <button class="btn btn-primary" onclick="conectar()">Conectar</button>
-        <button class="btn btn-success" onclick="verificarQR()">Ver QR</button>
-        <button class="btn btn-danger" onclick="desconectar()">Desconectar</button>
-      </div>
-    </div>
-    
-    <div class="card">
-      <h2>📊 Estadísticas del ChatBot</h2>
-      <div class="stats">
-        <div class="stat"><h3 id="sClientes">0</h3><p>Clientes</p></div>
-        <div class="stat"><h3 id="sConv">0</h3><p>Conversaciones</p></div>
-        <div class="stat"><h3 id="sInter">0</h3><p>Interacciones Hoy</p></div>
-        <div class="stat"><h3 id="sBot">-</h3><p>ChatBot</p></div>
-      </div>
-    </div>
-    
-    <div class="card">
-      <h2>📥 Exportar a Excel</h2>
-      <div style="text-align:center;">
-        <button class="btn btn-success" onclick="window.location.href='/api/exportar/reporte'">📊 Reporte Completo</button>
-        <button class="btn btn-primary" onclick="window.location.href='/api/exportar/interacciones'">💬 Interacciones</button>
-        <button class="btn btn-primary" onclick="window.location.href='/api/exportar/conversaciones'">🗂️ Conversaciones</button>
-        <button class="btn btn-primary" onclick="window.location.href='/api/exportar/clientes'">👥 Clientes</button>
-      </div>
-    </div>
-    
-    <div class="card">
-      <h2>📤 Cargar Cartera de Clientes</h2>
-      <p style="color:#666; margin-bottom:15px;">Sube un Excel con columnas: Cliente, Teléfono, Saldo, Días Atraso</p>
-      <div style="text-align:center;">
-        <input type="file" id="archivoExcel" accept=".xlsx,.xls" style="display:none;" onchange="subirCartera(this)">
-        <button class="btn btn-success" onclick="document.getElementById('archivoExcel').click()">📂 Seleccionar Excel</button>
-      </div>
-      <div id="resultadoCarga" style="margin-top:15px; text-align:center;"></div>
-    </div>
-    
-    <div class="card">
-      <h2>👥 Gestores</h2>
-      <div class="gestores" id="gestores"></div>
-    </div>
-    
-    <div class="card">
-      <h2>📋 Últimas Interacciones</h2>
-      <div class="log" id="log">Cargando...</div>
-    </div>
-    
-    <p class="footer">LMV CREDIA SA DE CV - Sistema de Cobranza</p>
-  </div>
-  
-  <script>
-    async function cargarEstado() {
-      try {
-        const res = await fetch('/api/estado');
-        const d = await res.json();
-        const st = document.getElementById('status');
-        
-        if (d.conectado) {
-          st.className = 'status ok';
-          st.innerHTML = '✅ CONECTADO - ' + (d.info?.nombre || 'WhatsApp');
-          document.getElementById('qrArea').innerHTML = '';
-        } else {
-          st.className = 'status error';
-          st.innerHTML = '❌ DESCONECTADO - Escanea el QR';
-        }
-        
-        if (d.chatbot) {
-          document.getElementById('sClientes').textContent = d.chatbot.clientesRegistrados || 0;
-          document.getElementById('sConv').textContent = d.chatbot.conversacionesActivas || 0;
-          document.getElementById('sInter').textContent = d.chatbot.interaccionesHoy || 0;
-          document.getElementById('sBot').textContent = d.chatbot.activo ? '✅ Activo' : '⏸️ Pausado';
-          
-          document.getElementById('gestores').innerHTML = (d.chatbot.gestores || []).map(g =>
-            '<div class="gestor"><span>👤 ' + g.nombre + '</span><span>📱 ' + g.telefono + '</span></div>'
-          ).join('');
-        }
-      } catch (e) { console.error(e); }
-    }
-    
-    async function cargarInteracciones() {
-      try {
-        const res = await fetch('/api/chatbot/interacciones?limite=15');
-        const data = await res.json();
-        document.getElementById('log').innerHTML = data.reverse().map(i =>
-          '<div class="log-item"><small>' + new Date(i.timestamp).toLocaleTimeString() + '</small> ' +
-          '<strong>' + i.telefono + '</strong>: ' + i.tipo + ' - ' + (i.detalle || '').substring(0,40) + '</div>'
-        ).join('') || 'Sin interacciones';
-      } catch (e) {}
-    }
-    
-    async function conectar() {
-      document.getElementById('status').className = 'status loading';
-      document.getElementById('status').textContent = 'Conectando...';
-      await fetch('/api/conectar', { method: 'POST' });
-      setTimeout(verificarQR, 2000);
-    }
-    
-    async function verificarQR() {
-      const res = await fetch('/api/qr');
-      const d = await res.json();
-      if (d.qr) {
-        document.getElementById('qrArea').innerHTML = '<div class="qr-container"><p>📱 Escanea con WhatsApp:</p><img src="' + d.qr + '"></div>';
-      } else if (d.conectado) {
-        document.getElementById('qrArea').innerHTML = '<p style="text-align:center;color:green;">✅ Ya conectado</p>';
-      }
-      setTimeout(cargarEstado, 3000);
-    }
-    
-    async function desconectar() {
-      await fetch('/api/desconectar', { method: 'POST' });
-      cargarEstado();
-    }
-    
-    async function subirCartera(input) {
-      const file = input.files[0];
-      if (!file) return;
-      
-      const resultado = document.getElementById('resultadoCarga');
-      resultado.innerHTML = '<p style="color:#856404;">⏳ Cargando...</p>';
-      
-      const formData = new FormData();
-      formData.append('archivo', file);
-      
-      try {
-        const res = await fetch('/api/subir-excel', {
-          method: 'POST',
-          body: formData
-        });
-        const data = await res.json();
-        
-        if (data.exito) {
-          resultado.innerHTML = '<p style="color:#155724;">✅ ' + data.totalRegistros + ' clientes cargados correctamente</p>';
-          cargarEstado();
-        } else {
-          resultado.innerHTML = '<p style="color:#721c24;">❌ Error: ' + data.mensaje + '</p>';
-        }
-      } catch (e) {
-        resultado.innerHTML = '<p style="color:#721c24;">❌ Error: ' + e.message + '</p>';
-      }
-      
-      input.value = '';
-    }
-    
-    cargarEstado();
-    cargarInteracciones();
-    setInterval(cargarEstado, 5000);
-    setInterval(cargarInteracciones, 10000);
-  </script>
-</body>
-</html>`);
+  res.send(getPanelHTML());
 });
 
 // ═══════════════════════════════════════════════════════════
@@ -658,17 +513,519 @@ app.get('/', (req, res) => {
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log('\n═══════════════════════════════════════════════════════════');
-  console.log('🚀 CELEXPRESS WHATSAPP + CHATBOT');
+  console.log('🚀 CELEXPRESS WHATSAPP + CHATBOT + ENVÍO MASIVO');
   console.log('   LMV CREDIA SA DE CV');
   console.log('═══════════════════════════════════════════════════════════');
   console.log(`📡 Servidor: http://localhost:${PORT}`);
   console.log('🤖 ChatBot: Esperando conexión WhatsApp...');
+  console.log('📤 Envío Masivo: Listo (anti-baneo activado)');
   console.log('👥 Gestores: Lic. Carlos, Lic. Gustavo');
   console.log('═══════════════════════════════════════════════════════════\n');
 });
 
 process.on('SIGINT', async () => {
   console.log('\n🛑 Cerrando servidor...');
+  envioMasivoService.cancelar();
   await whatsappService.cerrarSesion();
   process.exit(0);
 });
+
+// ═══════════════════════════════════════════════════════════
+// HTML DEL PANEL
+// ═══════════════════════════════════════════════════════════
+
+function getPanelHTML() {
+  return `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <title>CelExpress - Panel de Control</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0B1120;
+      --bg2: #111827;
+      --card: #1A2332;
+      --border: #2A3A4E;
+      --text: #E2E8F0;
+      --muted: #8896A6;
+      --accent: #3B82F6;
+      --accent2: #2563EB;
+      --green: #10B981;
+      --green-bg: rgba(16,185,129,0.12);
+      --red: #EF4444;
+      --red-bg: rgba(239,68,68,0.12);
+      --yellow: #F59E0B;
+      --yellow-bg: rgba(245,158,11,0.12);
+      --purple: #8B5CF6;
+    }
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { font-family:'DM Sans',sans-serif; background:var(--bg); color:var(--text); min-height:100vh; }
+    
+    .header { background:var(--bg2); border-bottom:1px solid var(--border); padding:16px 24px; display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:10; }
+    .header h1 { font-size:1.1rem; font-weight:700; display:flex; align-items:center; gap:10px; }
+    .header h1 span { color:var(--accent); }
+    .conn-badge { padding:6px 14px; border-radius:20px; font-size:0.78rem; font-weight:600; }
+    .conn-badge.on { background:var(--green-bg); color:var(--green); }
+    .conn-badge.off { background:var(--red-bg); color:var(--red); }
+    
+    .container { max-width:1100px; margin:0 auto; padding:20px; }
+    
+    .grid { display:grid; gap:16px; }
+    .grid-2 { grid-template-columns:1fr 1fr; }
+    .grid-4 { grid-template-columns:repeat(4,1fr); }
+    @media(max-width:768px) { .grid-2,.grid-4 { grid-template-columns:1fr; } }
+    
+    .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:20px; }
+    .card h2 { font-size:0.85rem; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:14px; }
+    
+    .stat-card { text-align:center; }
+    .stat-card .num { font-size:2rem; font-weight:700; font-family:'JetBrains Mono',monospace; }
+    .stat-card .label { font-size:0.78rem; color:var(--muted); margin-top:4px; }
+    .num.green { color:var(--green); }
+    .num.yellow { color:var(--yellow); }
+    .num.red { color:var(--red); }
+    .num.blue { color:var(--accent); }
+    
+    .btn { padding:10px 18px; border:none; border-radius:8px; cursor:pointer; font-family:inherit; font-weight:600; font-size:0.82rem; transition:all 0.15s; display:inline-flex; align-items:center; gap:6px; }
+    .btn:hover { transform:translateY(-1px); filter:brightness(1.1); }
+    .btn:active { transform:translateY(0); }
+    .btn-primary { background:var(--accent); color:white; }
+    .btn-green { background:var(--green); color:white; }
+    .btn-red { background:var(--red); color:white; }
+    .btn-yellow { background:var(--yellow); color:#1a1a1a; }
+    .btn-outline { background:transparent; border:1px solid var(--border); color:var(--text); }
+    .btn:disabled { opacity:0.5; cursor:not-allowed; transform:none; }
+    .btn-sm { padding:6px 12px; font-size:0.75rem; }
+    
+    .progress-bar { width:100%; height:8px; background:var(--bg); border-radius:4px; overflow:hidden; margin:12px 0; }
+    .progress-fill { height:100%; background:linear-gradient(90deg,var(--accent),var(--green)); border-radius:4px; transition:width 0.5s ease; }
+    
+    textarea, input[type=text], input[type=number], select {
+      width:100%; padding:10px 14px; background:var(--bg); border:1px solid var(--border);
+      border-radius:8px; color:var(--text); font-family:inherit; font-size:0.85rem; resize:vertical;
+    }
+    textarea:focus, input:focus, select:focus { outline:none; border-color:var(--accent); }
+    
+    label { font-size:0.8rem; font-weight:500; color:var(--muted); margin-bottom:6px; display:block; }
+    
+    .file-drop { border:2px dashed var(--border); border-radius:12px; padding:30px; text-align:center; cursor:pointer; transition:all 0.2s; }
+    .file-drop:hover { border-color:var(--accent); background:rgba(59,130,246,0.05); }
+    .file-drop.active { border-color:var(--green); background:rgba(16,185,129,0.05); }
+    .file-drop p { color:var(--muted); font-size:0.85rem; margin-top:8px; }
+    
+    .log-panel { background:var(--bg); border-radius:8px; padding:12px; max-height:220px; overflow-y:auto; font-family:'JetBrains Mono',monospace; font-size:0.75rem; }
+    .log-line { padding:4px 0; border-bottom:1px solid rgba(255,255,255,0.04); display:flex; gap:8px; }
+    .log-time { color:var(--muted); min-width:65px; }
+    .log-ok { color:var(--green); }
+    .log-err { color:var(--red); }
+    .log-info { color:var(--accent); }
+    
+    .tag { display:inline-block; padding:3px 8px; border-radius:4px; font-size:0.7rem; font-weight:600; }
+    .tag-ok { background:var(--green-bg); color:var(--green); }
+    .tag-err { background:var(--red-bg); color:var(--red); }
+    .tag-wait { background:var(--yellow-bg); color:var(--yellow); }
+    
+    .controls { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+    
+    .gestor-row { display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background:var(--bg); border-radius:8px; margin-bottom:6px; }
+    
+    .vars-help { background:var(--bg); border-radius:8px; padding:10px 14px; font-size:0.78rem; color:var(--muted); margin-top:8px; }
+    .vars-help code { background:var(--card); padding:2px 6px; border-radius:4px; color:var(--accent); font-family:'JetBrains Mono',monospace; }
+    
+    .section-title { font-size:1rem; font-weight:700; margin:24px 0 12px; display:flex; align-items:center; gap:8px; }
+    
+    .hidden { display:none !important; }
+    
+    #qrArea img { max-width:220px; border-radius:8px; margin:12px auto; display:block; }
+    
+    .preview-table { width:100%; font-size:0.78rem; border-collapse:collapse; margin-top:10px; }
+    .preview-table th { text-align:left; padding:6px 8px; color:var(--muted); border-bottom:1px solid var(--border); font-weight:600; }
+    .preview-table td { padding:6px 8px; border-bottom:1px solid rgba(255,255,255,0.03); }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <h1>📡 <span>CelExpress</span> WhatsApp Bot</h1>
+  <div>
+    <span class="conn-badge off" id="connBadge">● Desconectado</span>
+  </div>
+</div>
+
+<div class="container">
+
+  <!-- Stats -->
+  <div class="grid grid-4" style="margin-bottom:16px;">
+    <div class="card stat-card"><div class="num green" id="sEnviados">0</div><div class="label">Enviados hoy</div></div>
+    <div class="card stat-card"><div class="num blue" id="sClientes">0</div><div class="label">Clientes cargados</div></div>
+    <div class="card stat-card"><div class="num yellow" id="sConv">0</div><div class="label">Conversaciones</div></div>
+    <div class="card stat-card"><div class="num" id="sBot" style="color:var(--muted)">—</div><div class="label">ChatBot</div></div>
+  </div>
+
+  <div class="grid grid-2">
+    
+    <!-- COLUMNA IZQUIERDA -->
+    <div>
+      <!-- Conexión -->
+      <div class="card" style="margin-bottom:16px;">
+        <h2>📱 Conexión WhatsApp</h2>
+        <div id="qrArea"></div>
+        <div class="controls">
+          <button class="btn btn-primary" onclick="conectar()">Conectar</button>
+          <button class="btn btn-outline" onclick="verificarQR()">Ver QR</button>
+          <button class="btn btn-red btn-sm" onclick="desconectar()">Desconectar</button>
+        </div>
+      </div>
+      
+      <!-- Cargar Excel -->
+      <div class="card" style="margin-bottom:16px;">
+        <h2>📂 Cargar Cartera (Excel/CSV)</h2>
+        <div class="file-drop" id="fileDrop" onclick="document.getElementById('fileInput').click()">
+          <div style="font-size:1.5rem;">📄</div>
+          <p>Click o arrastra tu archivo aquí</p>
+          <p style="font-size:0.72rem;">Columnas: Cliente/nombre, Teléfono/telefono, Saldo/saldo, Días Atraso/diasAtraso</p>
+        </div>
+        <input type="file" id="fileInput" accept=".xlsx,.xls,.csv" style="display:none" onchange="subirArchivo(this)">
+        <div id="fileResult" class="hidden" style="margin-top:12px;"></div>
+      </div>
+      
+      <!-- Gestores -->
+      <div class="card">
+        <h2>👥 Gestores</h2>
+        <div id="gestoresArea"></div>
+      </div>
+    </div>
+    
+    <!-- COLUMNA DERECHA -->
+    <div>
+      <!-- Campaña Masiva -->
+      <div class="card" style="margin-bottom:16px;">
+        <h2>📤 Campaña de Envío Masivo</h2>
+        
+        <div style="margin-bottom:12px;">
+          <label>Nombre de campaña</label>
+          <input type="text" id="campNombre" placeholder="Ej: Cobranza Marzo 2026">
+        </div>
+        
+        <div style="margin-bottom:12px;">
+          <label>Mensaje (plantilla)</label>
+          <textarea id="campPlantilla" rows="5" placeholder="Ej: Hola {nombre}, le recordamos su adeudo de {saldo} con {dias} días de atraso..."></textarea>
+          <div class="vars-help">
+            Variables: <code>{nombre}</code> <code>{saldo}</code> <code>{dias}</code> <code>{telefono}</code>
+          </div>
+        </div>
+        
+        <div style="margin-bottom:12px;">
+          <label>Imagen estándar (opcional)</label>
+          <input type="file" id="campImagen" accept="image/*">
+        </div>
+        
+        <div class="grid grid-2" style="margin-bottom:12px; gap:8px;">
+          <div>
+            <label>Delay mín (seg)</label>
+            <input type="number" id="cfgDelayMin" value="25" min="10">
+          </div>
+          <div>
+            <label>Delay máx (seg)</label>
+            <input type="number" id="cfgDelayMax" value="90" min="20">
+          </div>
+          <div>
+            <label>Lote (msgs)</label>
+            <input type="number" id="cfgLote" value="8" min="3" max="15">
+          </div>
+          <div>
+            <label>Límite diario</label>
+            <input type="number" id="cfgLimite" value="45" min="10">
+          </div>
+        </div>
+        
+        <div class="controls">
+          <button class="btn btn-green" id="btnIniciar" onclick="iniciarCampana()" disabled>▶ Iniciar Envío</button>
+          <button class="btn btn-yellow" id="btnPausar" onclick="pausarCampana()" disabled>⏸ Pausar</button>
+          <button class="btn btn-red btn-sm" id="btnCancelar" onclick="cancelarCampana()" disabled>✕ Cancelar</button>
+        </div>
+        
+        <!-- Progreso -->
+        <div id="progresoArea" class="hidden" style="margin-top:16px;">
+          <div style="display:flex; justify-content:space-between; font-size:0.82rem;">
+            <span id="progTexto">0/0 enviados</span>
+            <span id="progPct" style="font-weight:700; color:var(--accent);">0%</span>
+          </div>
+          <div class="progress-bar"><div class="progress-fill" id="progBar" style="width:0%"></div></div>
+          <div style="display:flex; justify-content:space-between; font-size:0.72rem; color:var(--muted);">
+            <span>⏱ Estimado: <span id="progETA">—</span></span>
+            <span>❌ Fallidos: <span id="progFail" style="color:var(--red);">0</span></span>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Log de actividad -->
+      <div class="card">
+        <h2>📋 Actividad Reciente</h2>
+        <div class="log-panel" id="logPanel">
+          <div class="log-line"><span class="log-info">Esperando actividad...</span></div>
+        </div>
+        <div class="controls" style="margin-top:8px;">
+          <button class="btn btn-outline btn-sm" onclick="location.href='/api/exportar/reporte'">📊 Exportar Reporte</button>
+          <button class="btn btn-outline btn-sm" onclick="location.href='/api/exportar/interacciones'">💬 Exportar Chat</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+let contactosCargados = null;
+
+// ═══════════════════════════════════
+// ESTADO GENERAL
+// ═══════════════════════════════════
+
+async function cargarEstado() {
+  try {
+    const r = await fetch('/api/estado');
+    const d = await r.json();
+    const badge = document.getElementById('connBadge');
+    
+    if (d.conectado) {
+      badge.className = 'conn-badge on';
+      badge.textContent = '● Conectado' + (d.info?.nombre ? ' — ' + d.info.nombre : '');
+      document.getElementById('qrArea').innerHTML = '';
+    } else {
+      badge.className = 'conn-badge off';
+      badge.textContent = '● Desconectado';
+    }
+    
+    if (d.chatbot) {
+      document.getElementById('sClientes').textContent = d.chatbot.clientesRegistrados || 0;
+      document.getElementById('sConv').textContent = d.chatbot.conversacionesActivas || 0;
+      document.getElementById('sBot').textContent = d.chatbot.activo ? '✅ ON' : '⏸ OFF';
+      document.getElementById('sBot').style.color = d.chatbot.activo ? 'var(--green)' : 'var(--muted)';
+      
+      const ga = document.getElementById('gestoresArea');
+      ga.innerHTML = (d.chatbot.gestores || []).map(g =>
+        '<div class="gestor-row"><span>👤 ' + g.nombre + '</span><span style="color:var(--muted);font-size:0.82rem;">' + g.telefono + '</span></div>'
+      ).join('');
+    }
+    
+    // Progreso del envío masivo
+    if (d.progreso) {
+      actualizarProgreso(d.progreso);
+      document.getElementById('sEnviados').textContent = 
+        (d.estadisticasEnvio?.config?.enviadosHoy || d.progreso.enviados || 0);
+    }
+    
+    // Habilitar botón si hay contactos Y está conectado
+    document.getElementById('btnIniciar').disabled = !(contactosCargados && d.conectado);
+    
+  } catch(e) { console.error(e); }
+}
+
+function actualizarProgreso(p) {
+  const area = document.getElementById('progresoArea');
+  const btnI = document.getElementById('btnIniciar');
+  const btnP = document.getElementById('btnPausar');
+  const btnC = document.getElementById('btnCancelar');
+  
+  if (p.enProgreso || p.enviados > 0 || p.fallidos > 0) {
+    area.classList.remove('hidden');
+    document.getElementById('progTexto').textContent = p.enviados + '/' + p.total + ' enviados';
+    document.getElementById('progPct').textContent = p.porcentaje + '%';
+    document.getElementById('progBar').style.width = p.porcentaje + '%';
+    document.getElementById('progFail').textContent = p.fallidos;
+    document.getElementById('progETA').textContent = p.tiempoEstimado > 0 ? '~' + p.tiempoEstimado + ' min' : '—';
+  }
+  
+  if (p.enProgreso) {
+    btnI.disabled = true;
+    btnP.disabled = false;
+    btnC.disabled = false;
+    btnP.textContent = p.pausado ? '▶ Reanudar' : '⏸ Pausar';
+    btnP.onclick = p.pausado ? reanudarCampana : pausarCampana;
+  } else {
+    btnP.disabled = true;
+    btnC.disabled = true;
+  }
+}
+
+// ═══════════════════════════════════
+// CONEXIÓN
+// ═══════════════════════════════════
+
+async function conectar() {
+  await fetch('/api/conectar', { method:'POST' });
+  setTimeout(verificarQR, 2000);
+}
+
+async function verificarQR() {
+  const r = await fetch('/api/qr');
+  const d = await r.json();
+  if (d.qr) {
+    document.getElementById('qrArea').innerHTML = '<p style="text-align:center;font-size:0.82rem;color:var(--muted);">Escanea con WhatsApp:</p><img src="' + d.qr + '">';
+  } else if (d.conectado) {
+    document.getElementById('qrArea').innerHTML = '<p style="text-align:center;color:var(--green);font-size:0.82rem;">✅ Conectado</p>';
+  }
+  setTimeout(cargarEstado, 3000);
+}
+
+async function desconectar() {
+  await fetch('/api/desconectar', { method:'POST' });
+  cargarEstado();
+}
+
+// ═══════════════════════════════════
+// CARGAR EXCEL
+// ═══════════════════════════════════
+
+async function subirArchivo(input) {
+  const file = input.files[0];
+  if (!file) return;
+  
+  const result = document.getElementById('fileResult');
+  result.classList.remove('hidden');
+  result.innerHTML = '<span class="tag tag-wait">Cargando...</span>';
+  
+  const fd = new FormData();
+  fd.append('archivo', file);
+  
+  try {
+    const r = await fetch('/api/subir-excel', { method:'POST', body:fd });
+    const d = await r.json();
+    
+    if (d.exito) {
+      contactosCargados = d.datos;
+      
+      let html = '<span class="tag tag-ok">✅ ' + d.totalRegistros + ' contactos cargados</span>';
+      html += '<table class="preview-table"><tr>';
+      d.columnas.forEach(c => html += '<th>' + c + '</th>');
+      html += '</tr>';
+      (d.preview || []).forEach(row => {
+        html += '<tr>';
+        d.columnas.forEach(c => html += '<td>' + (row[c] || '') + '</td>');
+        html += '</tr>';
+      });
+      html += '</table>';
+      
+      result.innerHTML = html;
+      document.getElementById('fileDrop').classList.add('active');
+      cargarEstado(); // Refresh para habilitar botón
+    } else {
+      result.innerHTML = '<span class="tag tag-err">❌ ' + d.mensaje + '</span>';
+    }
+  } catch(e) {
+    result.innerHTML = '<span class="tag tag-err">❌ Error: ' + e.message + '</span>';
+  }
+  input.value = '';
+}
+
+// Drag & drop
+const drop = document.getElementById('fileDrop');
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.style.borderColor = 'var(--accent)'; });
+drop.addEventListener('dragleave', () => { drop.style.borderColor = ''; });
+drop.addEventListener('drop', e => {
+  e.preventDefault();
+  drop.style.borderColor = '';
+  const fi = document.getElementById('fileInput');
+  fi.files = e.dataTransfer.files;
+  subirArchivo(fi);
+});
+
+// ═══════════════════════════════════
+// CAMPAÑA MASIVA
+// ═══════════════════════════════════
+
+async function iniciarCampana() {
+  if (!contactosCargados?.length) return alert('Primero carga un Excel con contactos');
+  
+  const plantilla = document.getElementById('campPlantilla').value.trim();
+  const imgInput = document.getElementById('campImagen');
+  
+  if (!plantilla && !imgInput.files[0]) return alert('Escribe un mensaje o selecciona una imagen');
+  
+  const fd = new FormData();
+  fd.append('contactos', JSON.stringify(contactosCargados));
+  fd.append('plantilla', plantilla);
+  fd.append('nombreCampana', document.getElementById('campNombre').value || 'Campaña ' + new Date().toLocaleDateString('es-MX'));
+  fd.append('config', JSON.stringify({
+    delayMinimo: parseInt(document.getElementById('cfgDelayMin').value) * 1000,
+    delayMaximo: parseInt(document.getElementById('cfgDelayMax').value) * 1000,
+    tamanoLote: parseInt(document.getElementById('cfgLote').value),
+    limiteDiario: parseInt(document.getElementById('cfgLimite').value),
+  }));
+  
+  if (imgInput.files[0]) fd.append('imagen', imgInput.files[0]);
+  
+  try {
+    const r = await fetch('/api/campana/iniciar', { method:'POST', body:fd });
+    const d = await r.json();
+    
+    if (d.exito) {
+      addLog('✅ Campaña iniciada: ' + d.campana, 'ok');
+    } else {
+      addLog('❌ ' + d.mensaje, 'err');
+    }
+    cargarEstado();
+  } catch(e) {
+    addLog('❌ Error: ' + e.message, 'err');
+  }
+}
+
+async function pausarCampana() {
+  await fetch('/api/campana/pausar', { method:'POST' });
+  addLog('⏸ Campaña pausada', 'info');
+  cargarEstado();
+}
+
+async function reanudarCampana() {
+  await fetch('/api/campana/reanudar', { method:'POST' });
+  addLog('▶ Campaña reanudada', 'info');
+  cargarEstado();
+}
+
+async function cancelarCampana() {
+  if (!confirm('¿Cancelar el envío masivo?')) return;
+  await fetch('/api/campana/cancelar', { method:'POST' });
+  addLog('🛑 Campaña cancelada', 'err');
+  cargarEstado();
+}
+
+// ═══════════════════════════════════
+// LOG / INTERACCIONES
+// ═══════════════════════════════════
+
+function addLog(text, type) {
+  const panel = document.getElementById('logPanel');
+  const time = new Date().toLocaleTimeString('es-MX', {hour:'2-digit',minute:'2-digit'});
+  const cls = type === 'ok' ? 'log-ok' : type === 'err' ? 'log-err' : 'log-info';
+  panel.innerHTML = '<div class="log-line"><span class="log-time">' + time + '</span><span class="' + cls + '">' + text + '</span></div>' + panel.innerHTML;
+  if (panel.children.length > 50) panel.removeChild(panel.lastChild);
+}
+
+async function cargarLog() {
+  try {
+    const r = await fetch('/api/chatbot/interacciones?limite=15');
+    const data = await r.json();
+    if (!data.length) return;
+    const panel = document.getElementById('logPanel');
+    panel.innerHTML = data.reverse().map(i => {
+      const t = new Date(i.timestamp).toLocaleTimeString('es-MX', {hour:'2-digit',minute:'2-digit'});
+      const cls = i.tipo === 'enviado' ? 'log-ok' : i.tipo === 'recibido' ? 'log-info' : 'log-err';
+      return '<div class="log-line"><span class="log-time">' + t + '</span><span class="' + cls + '">' + i.telefono + ' ' + i.tipo + ': ' + (i.detalle||'').substring(0,45) + '</span></div>';
+    }).join('');
+  } catch(e) {}
+}
+
+// ═══════════════════════════════════
+// INIT
+// ═══════════════════════════════════
+
+cargarEstado();
+cargarLog();
+setInterval(cargarEstado, 4000);
+setInterval(cargarLog, 8000);
+</script>
+</body>
+</html>`;
+}
