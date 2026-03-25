@@ -449,14 +449,21 @@ class EnvioMasivoService {
       const typingDelay = this.getDelayTyping();
       await this._sleep(typingDelay);
 
-      // 3. Enviar mensaje
+      // 3. Enviar mensaje (con timeout de 60s para evitar que se trabe)
+      const enviarConTimeout = (msgContent) => {
+        return Promise.race([
+          this.whatsapp.sock.sendMessage(jid, msgContent),
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Timeout: envío tardó más de 60s')), 60000)
+          )
+        ]);
+      };
+
       if (imagen) {
-        // Enviar imagen + caption
         const caption = plantilla ? this.personalizarMensaje(plantilla, contacto) : '';
         
         let mediaContent;
         if (imagen.startsWith('data:') || imagen.startsWith('/9j/') || imagen.startsWith('iVBOR')) {
-          // Base64
           const matches = imagen.match(/^data:(.+);base64,(.+)$/);
           if (matches) {
             mediaContent = Buffer.from(matches[2], 'base64');
@@ -464,21 +471,18 @@ class EnvioMasivoService {
             mediaContent = Buffer.from(imagen, 'base64');
           }
         } else if (imagen.startsWith('http')) {
-          // URL
           mediaContent = { url: imagen };
         } else {
-          // Ruta de archivo
           mediaContent = fs.readFileSync(imagen);
         }
 
-        await this.whatsapp.sock.sendMessage(jid, {
+        await enviarConTimeout({
           image: mediaContent,
           caption: caption,
         });
       } else {
-        // Solo texto
         const mensaje = this.personalizarMensaje(plantilla, contacto);
-        await this.whatsapp.sock.sendMessage(jid, { text: mensaje });
+        await enviarConTimeout({ text: mensaje });
       }
 
       // 4. Volver a "paused" (no disponible constantemente)
@@ -555,8 +559,32 @@ class EnvioMasivoService {
 
   cancelar() {
     this.cancelado = true;
-    this.pausado = false; // Liberar el loop si está en pausa
+    this.pausado = false;
+    
+    // Force reset si se quedó trabado
+    setTimeout(() => {
+      if (this.enviando) {
+        console.log('🔧 Force reset de campaña trabada');
+        this.enviando = false;
+        this.stats.enProgreso = false;
+        this.stats.pausado = false;
+      }
+    }, 3000);
+    
     console.log('🛑 Envío masivo CANCELADO');
+    return true;
+  }
+
+  // Forzar reset total (para cuando se traba)
+  forceReset() {
+    this.enviando = false;
+    this.pausado = false;
+    this.cancelado = true;
+    this.stats.enProgreso = false;
+    this.stats.pausado = false;
+    this.cola = [];
+    this.colaIndex = 0;
+    console.log('🔧 FORCE RESET completo');
     return true;
   }
 
