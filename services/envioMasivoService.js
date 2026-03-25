@@ -209,11 +209,10 @@ class EnvioMasivoService {
   // ═══════════════════════════════════════════════════════════
 
   /**
-   * Verifica si estamos en horario permitido
+   * Siempre permitido (sin restricción de horario)
    */
   enHorarioPermitido() {
-    const hora = new Date().getHours();
-    return hora >= this.config.horaInicio && hora < this.config.horaFin;
+    return true;
   }
 
   /**
