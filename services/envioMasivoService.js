@@ -82,6 +82,9 @@ class EnvioMasivoService {
     // Historial de campañas
     this.historial = [];
     
+    // Log en tiempo real (últimos 100 eventos)
+    this.logEventos = [];
+    
     // Caracteres invisibles para variación
     this.invisibles = [
       '\u200B', // Zero-width space
@@ -497,6 +500,9 @@ class EnvioMasivoService {
       this.stats.tiempoEstimado = this.calcularTiempoEstimado();
 
       console.log(`   ✅ [${this.stats.enviados}/${this.stats.totalContactos}] ${contacto.nombre} (${telefono})`);
+      
+      // Log en tiempo real
+      this._addLog('enviado', contacto.nombre, telefono, null);
 
     } catch (error) {
       item.estado = 'fallido';
@@ -511,6 +517,9 @@ class EnvioMasivoService {
       });
 
       console.log(`   ❌ [${this.stats.enviados + this.stats.fallidos}/${this.stats.totalContactos}] ${contacto.nombre} (${telefono}): ${error.message}`);
+      
+      // Log en tiempo real
+      this._addLog('fallido', contacto.nombre, telefono, error.message);
 
       // Si hay muchos errores seguidos, pausar (posible baneo)
       const erroresRecientes = this.stats.errores.filter(e => 
@@ -641,6 +650,22 @@ class EnvioMasivoService {
   // ═══════════════════════════════════════════════════════════
   // GETTERS
   // ═══════════════════════════════════════════════════════════
+
+  _addLog(tipo, nombre, telefono, error) {
+    this.logEventos.unshift({
+      tipo,
+      nombre,
+      telefono,
+      error,
+      timestamp: new Date().toISOString(),
+      progreso: `${this.stats.enviados + this.stats.fallidos}/${this.stats.totalContactos}`,
+    });
+    if (this.logEventos.length > 100) this.logEventos = this.logEventos.slice(0, 100);
+  }
+
+  getLogs(limite = 50) {
+    return this.logEventos.slice(0, limite);
+  }
 
   getEstadisticas() {
     return {
