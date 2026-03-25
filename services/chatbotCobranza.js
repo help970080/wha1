@@ -822,7 +822,27 @@ ${urgente ? '⏰ *Su caso es urgente, no demore.*' : 'O escriba *HOLA* para rein
   }
 
   obtenerCliente(telefono) {
-    return this.clientes.get(telefono) || { telefono, nombre: 'Cliente', saldo: 0, diasAtraso: 0 };
+    // Buscar con el teléfono tal cual
+    let cliente = this.clientes.get(telefono);
+    if (cliente) return cliente;
+    
+    // Buscar con últimos 10 dígitos
+    const tel10 = telefono.replace(/\D/g, '').slice(-10);
+    cliente = this.clientes.get(tel10);
+    if (cliente) return cliente;
+    
+    // Buscar con 52 + teléfono
+    cliente = this.clientes.get('52' + tel10);
+    if (cliente) return cliente;
+    
+    // Buscar recorriendo todos los clientes (fallback)
+    for (const [key, val] of this.clientes) {
+      const keyClean = key.replace(/\D/g, '').slice(-10);
+      if (keyClean === tel10) return val;
+    }
+    
+    console.log(`⚠️ Cliente no encontrado: ${telefono} (tel10: ${tel10}, clientes: ${this.clientes.size})`);
+    return { telefono, nombre: 'Cliente', saldo: 0, diasAtraso: 0 };
   }
 
   obtenerConversacion(telefono) {
@@ -843,11 +863,22 @@ ${urgente ? '⏰ *Su caso es urgente, no demore.*' : 'O escriba *HOLA* para rein
 
   cargarCartera(clientes) {
     clientes.forEach(c => {
-      const tel = c.telefono?.toString().replace(/\D/g, '').slice(-10);
-      if (tel) this.clientes.set(tel, c);
+      const tel = (c.telefono || c.Telefono || c.Teléfono || c.TELEFONO || '').toString().replace(/\D/g, '').slice(-10);
+      if (tel) {
+        // Guardar con datos normalizados
+        this.clientes.set(tel, {
+          telefono: tel,
+          nombre: c.nombre || c.Nombre || c.NOMBRE || c.Cliente || c.cliente || 'Cliente',
+          saldo: parseFloat(c.saldo || c.Saldo || c.SALDO || 0),
+          diasAtraso: parseInt(c.diasAtraso || c.DiasAtraso || c.DIASATRASO || c['Días Atraso'] || c['dias_atraso'] || 0),
+        });
+      }
     });
     this.guardarDatos();
     console.log(`✅ ${clientes.length} clientes cargados en chatbot`);
+    // Debug: mostrar primer cliente
+    const primer = [...this.clientes.values()][0];
+    if (primer) console.log(`   Ejemplo: ${primer.nombre} | ${primer.telefono} | $${primer.saldo} | ${primer.diasAtraso}d`);
     return this.clientes.size;
   }
 
