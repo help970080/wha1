@@ -21,8 +21,9 @@ const fs = require('fs');
 const path = require('path');
 
 class EnvioMasivoService {
-  constructor(whatsappService) {
+  constructor(whatsappService, chatbot) {
     this.whatsapp = whatsappService;
+    this.chatbot = chatbot || null;
     
     // Estado del envío
     this.enviando = false;
@@ -512,6 +513,15 @@ class EnvioMasivoService {
       this.stats.pendientes--;
       this.stats.ultimoEnvio = Date.now();
       this.config.enviadosHoy++;
+
+      // Mapear LID ↔ teléfono para que el chatbot encuentre al cliente cuando responda
+      // El JID puede ser @s.whatsapp.net o @lid
+      if (this.chatbot) {
+        const lidClean = jid.replace('@s.whatsapp.net', '').replace('@lid', '');
+        this.chatbot.mapearLid(lidClean, telefono);
+        // También mapear el JID completo sin @
+        this.chatbot.mapearLid(jid.split('@')[0], telefono);
+      }
 
       // Calcular velocidad y tiempo estimado
       const transcurrido = (Date.now() - this.stats.inicioEnvio) / 3600000; // horas
