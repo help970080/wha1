@@ -865,20 +865,23 @@ ${urgente ? '⏰ *Su caso es urgente, no demore.*' : 'O escriba *HOLA* para rein
     clientes.forEach(c => {
       const tel = (c.telefono || c.Telefono || c.Teléfono || c.TELEFONO || '').toString().replace(/\D/g, '').slice(-10);
       if (tel) {
-        // Guardar con datos normalizados
+        const saldoRaw = c.saldo ?? c.Saldo ?? c.SALDO ?? 0;
+        const diasRaw = c.diasAtraso ?? c.DiasAtraso ?? c.DIASATRASO ?? c['Días Atraso'] ?? c['dias_atraso'] ?? 0;
+        
         this.clientes.set(tel, {
           telefono: tel,
           nombre: c.nombre || c.Nombre || c.NOMBRE || c.Cliente || c.cliente || 'Cliente',
-          saldo: parseFloat(c.saldo || c.Saldo || c.SALDO || 0),
-          diasAtraso: parseInt(c.diasAtraso || c.DiasAtraso || c.DIASATRASO || c['Días Atraso'] || c['dias_atraso'] || 0),
+          saldo: parseFloat(saldoRaw) || 0,
+          diasAtraso: parseInt(diasRaw) || 0,
         });
       }
     });
     this.guardarDatos();
     console.log(`✅ ${clientes.length} clientes cargados en chatbot`);
-    // Debug: mostrar primer cliente
-    const primer = [...this.clientes.values()][0];
-    if (primer) console.log(`   Ejemplo: ${primer.nombre} | ${primer.telefono} | $${primer.saldo} | ${primer.diasAtraso}d`);
+    // Debug completo
+    for (const [tel, cli] of this.clientes) {
+      console.log(`   📋 ${cli.nombre} | tel:${tel} | saldo:${cli.saldo} | dias:${cli.diasAtraso}`);
+    }
     return this.clientes.size;
   }
 
@@ -887,8 +890,15 @@ ${urgente ? '⏰ *Su caso es urgente, no demore.*' : 'O escriba *HOLA* para rein
       if (fs.existsSync('chatbot_clientes.json')) {
         const data = JSON.parse(fs.readFileSync('chatbot_clientes.json', 'utf8'));
         data.forEach(c => {
-          const tel = c.telefono?.toString().replace(/\D/g, '').slice(-10);
-          if (tel) this.clientes.set(tel, c);
+          const tel = (c.telefono || '').toString().replace(/\D/g, '').slice(-10);
+          if (tel) {
+            this.clientes.set(tel, {
+              telefono: tel,
+              nombre: c.nombre || 'Cliente',
+              saldo: parseFloat(c.saldo) || 0,
+              diasAtraso: parseInt(c.diasAtraso) || 0,
+            });
+          }
         });
       }
     } catch (e) {}
