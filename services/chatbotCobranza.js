@@ -1,15 +1,21 @@
 /**
  * ═══════════════════════════════════════════════════════════
- * ChatBot de Cobranza - LeGaXi Asesores
+ * ChatBot de Cobranza - LeGaXi Asesores  (v2 - FIX IDENTIFICACIÓN)
  * Cobranza Mercantil Especializada
  * ═══════════════════════════════════════════════════════════
- * 
- * ✅ Respuestas automáticas a clientes
- * ✅ Convenios en 4, 8 y 12 pagos
- * ✅ Datos bancarios reales (SPIN-OXXO / BBVA)
- * ✅ Notificación a gestores
- * ✅ Detección de excusas/negativas/agresiones
- * 
+ *
+ * Cambios vs versión anterior:
+ *  - resolverTelefono(): elimina fallback "primer cliente sin LID".
+ *    Match por pushName ahora exige score 3+ y diferencia con segundo.
+ *  - obtenerCliente(): ya no inventa "Cliente" genérico, marca como
+ *    desconocido para que el bot pida identificación.
+ *  - generarRespuesta(): nuevo flujo de IDENTIFICACION para cuando
+ *    el cliente no se puede resolver automáticamente.
+ *  - cargarCartera(): limpia clientes, lidMap y conversaciones antes
+ *    de cargar nueva base.
+ *  - identificarManual(): nueva función para matchear cuando el
+ *    cliente envía su nombre o número de crédito.
+ *
  * Lic. Francisco Gabriel García Sánchez
  * ═══════════════════════════════════════════════════════════
  */
@@ -19,14 +25,14 @@ const fs = require('fs');
 class ChatBotCobranza {
   constructor(whatsappService) {
     this.whatsapp = whatsappService;
-    
+
     // Gestores configurados
     this.gestores = [
       { nombre: 'Lic. Carlos', telefono: '7352588215', activo: true },
       { nombre: 'Lic. Gustavo', telefono: '5548039744', activo: true }
     ];
     this.gestorActual = 0;
-    
+
     // Datos bancarios reales
     this.datosBancarios = {
       spinOxxo: {
@@ -41,13 +47,13 @@ class ChatBotCobranza {
       },
       titular: 'Lic. Francisco Gabriel García Sánchez',
     };
-    
+
     // Datos en memoria
     this.clientes = new Map();
     this.conversaciones = new Map();
     this.lidMap = new Map(); // LID → teléfono real
     this.interacciones = [];
-    
+
     // Estados
     this.ESTADOS = {
       INICIAL: 'inicial',
@@ -56,7 +62,8 @@ class ChatBotCobranza {
       CONVENIO: 'convenio',
       ESPERANDO_GESTOR: 'esperando_gestor',
       CONFIRMACION_PAGO: 'confirmacion_pago',
-      EXCUSAS: 'excusas'
+      EXCUSAS: 'excusas',
+      IDENTIFICACION: 'identificacion'
     };
 
     this.NIVELES = {
@@ -65,24 +72,24 @@ class ChatBotCobranza {
       GRAVE: 60,
       CRITICO: 90
     };
-    
+
     this.activo = false;
     this.cargarDatos();
   }
 
   iniciar() {
     if (this.activo) return;
-    
+
     console.log('\n🤖 ════════════════════════════════════');
     console.log('   CHATBOT DE COBRANZA INICIADO');
-    console.log('   LeGaXi Asesores - CME');
+    console.log('   LeGaXi Asesores - CME (v2)');
     console.log('   MODO: COBRANZA FIRME');
     console.log('════════════════════════════════════\n');
-    
+
     this.whatsapp.onMessage(async (msg) => {
       await this.procesarMensaje(msg);
     });
-    
+
     this.activo = true;
     console.log('✅ Escuchando mensajes entrantes...');
     console.log(`👥 Gestores: ${this.gestores.map(g => g.nombre).join(', ')}`);
@@ -96,7 +103,6 @@ class ChatBotCobranza {
     return 'CRITICO';
   }
 
-  // Formato de dinero bonito
   fmt(cantidad) {
     return '$' + Math.round(cantidad).toLocaleString('es-MX');
   }
@@ -104,37 +110,37 @@ class ChatBotCobranza {
   async procesarMensaje(msg) {
     try {
       const jid = msg.key.remoteJid;
-      
+
       if (!jid) return;
       if (jid.includes('@g.us')) return;
       if (jid.includes('@broadcast') || jid === 'status@broadcast') return;
       if (msg.key.fromMe) return;
       if (msg.message?.protocolMessage) return;
       if (msg.message?.reactionMessage) return;
-      
+
       let telefono = this.extraerTelefono(jid);
       const texto = this.extraerTexto(msg);
-      
+
       if (!jid.includes('@s.whatsapp.net') && !jid.includes('@lid')) {
         return;
       }
 
       // === RESOLVER TELÉFONO REAL ===
       let telParaConv = this.resolverTelefono(telefono, msg);
-      
+
       if (!texto) {
         if (msg.message?.imageMessage) {
           await this.manejarImagen(jid, telParaConv);
         }
         return;
       }
-      
+
       const mapped = telParaConv !== telefono;
       console.log(`📨 [${telParaConv}${mapped ? ' ←LID:'+telefono : ''}] ${texto.substring(0, 50)}`);
       this.registrarInteraccion(telParaConv, 'recibido', texto, jid);
-      
+
       const respuesta = this.generarRespuesta(telParaConv, texto);
-      
+
       if (respuesta) {
         await this.whatsapp.sock.sendMessage(jid, { text: respuesta });
         this.registrarInteraccion(telParaConv, 'enviado', respuesta.substring(0, 50), jid);
@@ -144,75 +150,159 @@ class ChatBotCobranza {
     }
   }
 
+  // ═══════════════════════════════════════
+  // RESOLVER TELÉFONO  (FIX PRINCIPAL)
+  // ═══════════════════════════════════════
+
   /**
-   * Resuelve un teléfono/LID al teléfono real del cliente
+   * Resuelve un teléfono/LID al teléfono real del cliente.
+   * NUNCA inventa: si no hay match confiable, devuelve el original
+   * y el bot pedirá identificación al cliente.
    */
   resolverTelefono(telefono, msg) {
-    // 1. Directo en clientes
+    // 1. Match directo
     if (this.clientes.has(telefono)) return telefono;
-    
-    // 2. Por lidMap
+
+    // 2. LID ya mapeado previamente
     if (this.lidMap.has(telefono)) return this.lidMap.get(telefono);
-    
+
     // 3. Últimos 10 dígitos
     const tel10 = telefono.replace(/\D/g, '').slice(-10);
-    if (this.clientes.has(tel10)) {
+    if (tel10.length === 10 && this.clientes.has(tel10)) {
       this.lidMap.set(telefono, tel10);
       return tel10;
     }
-    
+
     // 4. Con prefijo 52
     if (this.clientes.has('52' + tel10)) {
       this.lidMap.set(telefono, '52' + tel10);
       return '52' + tel10;
     }
 
-    // 5. Si solo hay 1 cliente, ES ESE. No hay vuelta.
+    // 5. Si solo hay 1 cliente, ES ESE (asignación segura)
     if (this.clientes.size === 1) {
       const unicoTel = [...this.clientes.keys()][0];
       this.lidMap.set(telefono, unicoTel);
       console.log(`🔗 Auto: único cliente ${telefono} → ${unicoTel}`);
       return unicoTel;
     }
-    
-    // 6. Buscar por pushName
+
+    // 6. Match ESTRICTO por pushName: requiere score 3+
+    //    y diferencia clara con el segundo lugar.
+    //    Esto evita matches por apellidos comunes (Martínez, López, García).
     const pushName = (msg?.pushName || '').trim().toLowerCase();
-    if (pushName && pushName.length >= 3) {
+    if (pushName.length >= 5) {
+      const pushParts = pushName.split(/\s+/).filter(p => p.length >= 3);
+      let mejorMatch = null;
+      let mejorScore = 0;
+      let segundoScore = 0;
+
       for (const [tel, cli] of this.clientes) {
-        const parts = (cli.nombre || '').toLowerCase().split(' ');
-        for (const part of parts) {
-          if (part.length >= 3 && (pushName.includes(part) || part.includes(pushName))) {
-            this.lidMap.set(telefono, tel);
-            console.log(`🔗 Match nombre "${pushName}" → ${tel}`);
-            return tel;
+        const nombreParts = (cli.nombre || '').toLowerCase().split(/\s+/).filter(p => p.length >= 3);
+        let score = 0;
+        for (const np of nombreParts) {
+          for (const pp of pushParts) {
+            if (np === pp) score += 2;        // match exacto vale más
+            else if (np.startsWith(pp) || pp.startsWith(np)) score += 1;
           }
         }
+        if (score > mejorScore) {
+          segundoScore = mejorScore;
+          mejorScore = score;
+          mejorMatch = tel;
+        } else if (score > segundoScore) {
+          segundoScore = score;
+        }
+      }
+
+      if (mejorMatch && mejorScore >= 3 && mejorScore > segundoScore) {
+        this.lidMap.set(telefono, mejorMatch);
+        console.log(`🔗 Match pushName "${pushName}" → ${mejorMatch} (score ${mejorScore})`);
+        return mejorMatch;
       }
     }
-    
-    // 7. Buscar cliente sin LID asignado
-    for (const [tel] of this.clientes) {
-      let asignado = false;
-      for (const [, v] of this.lidMap) {
-        if (v === tel) { asignado = true; break; }
-      }
-      if (!asignado) {
-        this.lidMap.set(telefono, tel);
-        console.log(`🔗 Cliente sin LID: ${telefono} → ${tel}`);
-        return tel;
-      }
-    }
-    
-    console.log(`⚠️ Sin resolver: LID=${telefono} pushName="${pushName}" clientes=${this.clientes.size}`);
+
+    // 7. SIN MATCH CONFIABLE: devolver original.
+    //    El bot detectará que es desconocido y pedirá identificación.
+    //    NO inventamos nada para evitar dirigirnos al cliente equivocado.
+    console.log(`⚠️ Sin match confiable: LID=${telefono} pushName="${pushName}" clientes=${this.clientes.size}`);
     return telefono;
   }
+
+  /**
+   * Match manual cuando el cliente envía su nombre o número de crédito
+   * después de que el bot le pidió identificarse.
+   */
+  identificarManual(telefonoOLid, datoIdentificacion) {
+    const dato = (datoIdentificacion || '').trim().toLowerCase();
+    if (dato.length < 3) return null;
+
+    // Si manda 10 dígitos, intentar matchear como teléfono
+    const soloDigitos = dato.replace(/\D/g, '');
+    if (soloDigitos.length === 10 && this.clientes.has(soloDigitos)) {
+      this.lidMap.set(telefonoOLid, soloDigitos);
+      console.log(`🔗 Identificación manual por teléfono: ${telefonoOLid} → ${soloDigitos}`);
+      return soloDigitos;
+    }
+
+    // Match por nombre (estricto)
+    const palabras = dato.split(/\s+/).filter(p => p.length >= 3);
+    let mejor = null, mejorScore = 0;
+    for (const [tel, cli] of this.clientes) {
+      const nombreParts = (cli.nombre || '').toLowerCase().split(/\s+/);
+      let score = 0;
+      for (const p of palabras) {
+        for (const np of nombreParts) {
+          if (np === p) score += 2;
+          else if (np.startsWith(p) || p.startsWith(np)) score += 1;
+        }
+      }
+      if (score > mejorScore) { mejorScore = score; mejor = tel; }
+    }
+    if (mejor && mejorScore >= 3) {
+      this.lidMap.set(telefonoOLid, mejor);
+      console.log(`🔗 Identificación manual por nombre: ${telefonoOLid} → ${mejor}`);
+      return mejor;
+    }
+    return null;
+  }
+
+  // ═══════════════════════════════════════
+  // GENERAR RESPUESTA  (FIX: maneja desconocidos)
+  // ═══════════════════════════════════════
 
   generarRespuesta(telefono, texto) {
     const textoLimpio = texto.trim().toLowerCase();
     const cliente = this.obtenerCliente(telefono);
     const conv = this.obtenerConversacion(telefono);
+
+    // FIX: si no identificamos al cliente, pedir identificación
+    // en lugar de saludarlo con un nombre equivocado
+    if (cliente.desconocido) {
+      // Si ya estaba en estado de identificación, intentar matchear
+      if (conv.estado === this.ESTADOS.IDENTIFICACION) {
+        const telReal = this.identificarManual(telefono, texto);
+        if (telReal) {
+          this.guardarConversacion(telReal, this.ESTADOS.MENU);
+          const clienteReal = this.obtenerCliente(telReal);
+          const nivelReal = this.getNivelMorosidad(clienteReal.diasAtraso || 0);
+          return this.msgBienvenida(clienteReal, nivelReal);
+        }
+        return `❌ No logré identificarlo con esos datos.
+
+Por favor envíe su *nombre completo* tal como aparece en su contrato, o su *número de crédito / teléfono registrado*.`;
+      }
+      // Primer mensaje sin identificar → pedir datos
+      this.guardarConversacion(telefono, this.ESTADOS.IDENTIFICACION);
+      return `👋 Hola, le saluda *LeGaXi Asesores* — Cobranza Mercantil Especializada.
+
+No logro identificarlo en nuestro sistema. ¿Me podría confirmar su *nombre completo* o su *número de crédito* para atenderlo correctamente?
+
+_Esto nos ayuda a evitar errores y proteger su información._`;
+    }
+
     const nivel = this.getNivelMorosidad(cliente.diasAtraso || 0);
-    
+
     if (this.esExcusa(textoLimpio)) {
       return this.manejarExcusa(telefono, textoLimpio, cliente, nivel);
     }
@@ -224,12 +314,12 @@ class ChatBotCobranza {
     if (this.esAgresion(textoLimpio)) {
       return this.manejarAgresion(telefono, cliente);
     }
-    
+
     if (['hola', 'hi', 'menu', 'inicio', 'buenos dias', 'buenas tardes', 'buenas noches'].some(cmd => textoLimpio.includes(cmd))) {
       this.guardarConversacion(telefono, this.ESTADOS.MENU);
       return this.msgBienvenida(cliente, nivel);
     }
-    
+
     switch (conv.estado) {
       case this.ESTADOS.MENU:
         return this.procesarMenu(telefono, textoLimpio, cliente, nivel);
@@ -284,7 +374,7 @@ class ChatBotCobranza {
   }
 
   // ═══════════════════════════════════════
-  // DATOS BANCARIOS (mensaje reutilizable)
+  // DATOS BANCARIOS
   // ═══════════════════════════════════════
 
   getDatosBancarios(referencia) {
@@ -315,7 +405,6 @@ class ChatBotCobranza {
     const dias = cliente.diasAtraso || 0;
     const nombre = cliente.nombre?.split(' ')[0] || 'Cliente';
 
-    // "Ya pagué"
     if (texto.includes('ya pagué') || texto.includes('ya pague') || texto.includes('está pagado')) {
       return `⚠️ *VERIFICACIÓN DE PAGO*
 
@@ -330,7 +419,6 @@ Sin comprobante, la deuda sigue vigente y las acciones de cobranza continúan.
 📸 *Envíe foto del comprobante*`;
     }
 
-    // "No es mi deuda"
     if (texto.includes('no es mío') || texto.includes('no reconozco') || texto.includes('yo no saqué')) {
       return `⚖️ *AVISO LEGAL*
 
@@ -350,7 +438,6 @@ De lo contrario, usted es legalmente responsable.
 Responda *SI* o *NO*`;
     }
 
-    // "Después", "Mañana", "Quincena"
     if (texto.includes('después') || texto.includes('mañana') || texto.includes('quincena') || texto.includes('fin de mes')) {
       if (nivel === 'CRITICO' || nivel === 'GRAVE') {
         return `🚫 *SIN PRÓRROGAS DISPONIBLES*
@@ -385,7 +472,6 @@ Entendemos, pero su deuda no puede esperar.
       }
     }
 
-    // "No tengo dinero"
     if (texto.includes('no tengo') || texto.includes('no me alcanza') || texto.includes('sin dinero')) {
       return `💡 *OPCIONES DE SOLUCIÓN*
 
@@ -405,7 +491,6 @@ La deuda existe y debe resolverse. Tenemos opciones:
 Responda con el *número*:`;
     }
 
-    // Excusa genérica
     return `⚠️ *AVISO*
 
 ${nombre}, las excusas no eliminan su deuda de *${this.fmt(saldo)}*.
@@ -519,11 +604,9 @@ _Cobranza Mercantil Especializada_`;
 
   procesarConvenio(telefono, texto, cliente, nivel) {
     const saldo = cliente.saldo ?? 0;
-    console.log(`🔎 CONVENIO DEBUG: tel=${telefono} nombre=${cliente.nombre} saldo=${cliente.saldo} saldoVar=${saldo} tipo=${typeof cliente.saldo}`);
-    
+
     switch (texto) {
       case '1': {
-        // Convenio 4 pagos — mostrar datos bancarios
         const monto = Math.round(saldo / 4);
         return `✅ *CONVENIO 4 PAGOS SELECCIONADO*
 
@@ -546,7 +629,6 @@ ${this.getDatosBancarios(telefono)}
 _Cobranza Mercantil Especializada_`;
       }
       case '2': {
-        // Convenio 8 pagos
         const monto = Math.round(saldo / 8);
         return `✅ *CONVENIO 8 PAGOS SELECCIONADO*
 
@@ -569,7 +651,6 @@ ${this.getDatosBancarios(telefono)}
 _Cobranza Mercantil Especializada_`;
       }
       case '3': {
-        // Convenio 12 pagos
         if (nivel === 'CRITICO') {
           return `⚠️ *NO DISPONIBLE*
 
@@ -611,9 +692,9 @@ _Cobranza Mercantil Especializada_`;
     const nivel = this.getNivelMorosidad(cliente.diasAtraso || 0);
     this.guardarConversacion(telefono, this.ESTADOS.ESPERANDO_GESTOR, { gestor });
     this.registrarInteraccion(telefono, 'transferencia', `${gestor.nombre}: ${motivo}`);
-    
+
     const prioridad = (nivel === 'CRITICO' || nivel === 'GRAVE') ? '🔴 ALTA' : '🟡 MEDIA';
-    
+
     const notif = `🔔 *NUEVA SOLICITUD* ${prioridad}
 
 ┌─────────────────────────
@@ -630,14 +711,14 @@ _Cobranza Mercantil Especializada_`;
     this.whatsapp.sock.sendMessage(jidGestor, { text: notif }).catch(e => {
       console.error('Error notificando gestor:', e.message);
     });
-    
+
     console.log(`📤 Notificación → ${gestor.nombre} [${prioridad}]`);
-    
+
     return `👤 *ASESOR ASIGNADO*
 
 Su caso fue asignado a *${gestor.nombre}*.
 
-${nivel === 'CRITICO' || nivel === 'GRAVE' ? 
+${nivel === 'CRITICO' || nivel === 'GRAVE' ?
 '⚠️ *Caso prioritario* — Será contactado en minutos.' :
 'Le contactarán pronto.'}
 
@@ -651,10 +732,24 @@ _Cobranza Mercantil Especializada_`;
 
   async manejarImagen(jid, telefono) {
     const cliente = this.obtenerCliente(telefono);
+
+    // FIX: si es desconocido, no transferir a gestor; pedir identificación
+    if (cliente.desconocido) {
+      this.guardarConversacion(telefono, this.ESTADOS.IDENTIFICACION);
+      await this.whatsapp.sock.sendMessage(jid, {
+        text: `📷 Recibimos su imagen, pero aún no lo identificamos en el sistema.
+
+Por favor envíe su *nombre completo* o *número de crédito* para poder validar su pago correctamente.
+
+_Cobranza Mercantil Especializada_`
+      });
+      return;
+    }
+
     this.registrarInteraccion(telefono, 'imagen', 'Posible comprobante');
     this.conectarGestor(telefono, cliente, '📷 Envió imagen (posible comprobante)');
-    
-    await this.whatsapp.sock.sendMessage(jid, { 
+
+    await this.whatsapp.sock.sendMessage(jid, {
       text: `📷 *COMPROBANTE RECIBIDO*
 
 Estamos verificando su pago.
@@ -665,7 +760,7 @@ Estamos verificando su pago.
 ❌ Si hay error, le notificaremos
 
 Gracias por su pago.
-_Cobranza Mercantil Especializada_` 
+_Cobranza Mercantil Especializada_`
     });
   }
 
@@ -764,7 +859,7 @@ _Cobranza Mercantil Especializada_`;
 
     return `💵 *PAGO PARCIAL*
 
-${nivel === 'CRITICO' || nivel === 'GRAVE' ? 
+${nivel === 'CRITICO' || nivel === 'GRAVE' ?
 `⚠️ Por su nivel de atraso, el mínimo es:\n*${this.fmt(minimo)}*` :
 `Puede abonar desde *${this.fmt(minimo)}*`}
 
@@ -781,7 +876,6 @@ _Cobranza Mercantil Especializada_`;
   msgConvenio(cliente, nivel) {
     const saldo = cliente.saldo ?? 0;
     const nombre = cliente.nombre?.split(' ')[0] || 'Cliente';
-    console.log(`🔎 MSG_CONVENIO: nombre=${nombre} saldo=${saldo} clienteSaldo=${cliente.saldo} tipo=${typeof cliente.saldo}`);
 
     if (nivel === 'CRITICO') {
       return `📋 *CONVENIO — ÚLTIMA OPORTUNIDAD*
@@ -852,7 +946,7 @@ _Cobranza Mercantil Especializada_`;
 
   msgNoEntendido(nivel) {
     const urgente = nivel === 'CRITICO' || nivel === 'GRAVE';
-    
+
     return `${urgente ? '⚠️' : '🤔'} No entendí su respuesta.
 
 Responda con el *número*:
@@ -891,38 +985,39 @@ ${urgente ? '⏰ *Su caso es urgente, no demore.*' : 'O escriba *HOLA* para rein
     return gestor;
   }
 
+  // FIX: marca clientes desconocidos en vez de inventar "Cliente" genérico
   obtenerCliente(telefono) {
     // 1. Buscar directo
     let cliente = this.clientes.get(telefono);
     if (cliente) return cliente;
-    
+
     // 2. Buscar por mapeo LID → teléfono real
     const telReal = this.lidMap.get(telefono);
     if (telReal) {
       cliente = this.clientes.get(telReal);
       if (cliente) return cliente;
     }
-    
+
     // 3. Buscar con últimos 10 dígitos
     const tel10 = telefono.replace(/\D/g, '').slice(-10);
     cliente = this.clientes.get(tel10);
     if (cliente) return cliente;
-    
+
     // 4. Buscar con 52 + teléfono
     cliente = this.clientes.get('52' + tel10);
     if (cliente) return cliente;
-    
-    // 5. Buscar recorriendo todos
+
+    // 5. Buscar recorriendo todos por últimos 10 dígitos
     for (const [key, val] of this.clientes) {
       const keyClean = key.replace(/\D/g, '').slice(-10);
-      if (keyClean === tel10) return val;
+      if (keyClean === tel10 && tel10.length === 10) return val;
     }
-    
-    console.log(`⚠️ Cliente no encontrado: ${telefono} (lidMap: ${this.lidMap.has(telefono) ? 'sí' : 'no'}, clientes: ${this.clientes.size})`);
-    return { telefono, nombre: 'Cliente', saldo: 0, diasAtraso: 0 };
+
+    // No encontrado: devolver desconocido (NO inventar)
+    console.log(`⚠️ Cliente no encontrado: ${telefono}`);
+    return { telefono, nombre: null, saldo: 0, diasAtraso: 0, desconocido: true };
   }
 
-  // Mapear un LID a un teléfono real de cliente
   mapearLid(lid, telefonoReal) {
     const tel10 = telefonoReal.replace(/\D/g, '').slice(-10);
     this.lidMap.set(lid, tel10);
@@ -938,20 +1033,28 @@ ${urgente ? '⏰ *Su caso es urgente, no demore.*' : 'O escriba *HOLA* para rein
   }
 
   registrarInteraccion(telefono, tipo, detalle, jidOriginal = null) {
-    this.interacciones.push({ 
-      telefono, jid: jidOriginal, tipo, detalle, 
-      timestamp: new Date().toISOString() 
+    this.interacciones.push({
+      telefono, jid: jidOriginal, tipo, detalle,
+      timestamp: new Date().toISOString()
     });
     if (this.interacciones.length > 500) this.interacciones = this.interacciones.slice(-250);
   }
 
-  cargarCartera(clientes) {
+  // FIX: limpia cache vieja antes de cargar nueva base
+  cargarCartera(clientes, reemplazar = true) {
+    if (reemplazar) {
+      this.clientes.clear();
+      this.lidMap.clear();
+      this.conversaciones.clear();
+      console.log('🧹 Cache limpiada antes de cargar nueva cartera');
+    }
+
     clientes.forEach(c => {
       const tel = (c.telefono || c.Telefono || c.Teléfono || c.TELEFONO || '').toString().replace(/\D/g, '').slice(-10);
       if (tel) {
         const saldoRaw = c.saldo ?? c.Saldo ?? c.SALDO ?? 0;
         const diasRaw = c.diasAtraso ?? c.DiasAtraso ?? c.DIASATRASO ?? c['Días Atraso'] ?? c['dias_atraso'] ?? 0;
-        
+
         this.clientes.set(tel, {
           telefono: tel,
           nombre: c.nombre || c.Nombre || c.NOMBRE || c.Cliente || c.cliente || 'Cliente',
@@ -965,16 +1068,16 @@ ${urgente ? '⏰ *Su caso es urgente, no demore.*' : 'O escriba *HOLA* para rein
     for (const [tel, cli] of this.clientes) {
       console.log(`   📋 ${cli.nombre} | tel:${tel} | saldo:${cli.saldo} | dias:${cli.diasAtraso}`);
     }
-    
+
     // Pre-mapear LIDs usando onWhatsApp (async, en background)
     this._premapearLids();
-    
+
     return this.clientes.size;
   }
 
   async _premapearLids() {
     if (!this.whatsapp?.sock || !this.whatsapp.isConnected()) return;
-    
+
     console.log('🔗 Pre-mapeando LIDs...');
     for (const [tel, cli] of this.clientes) {
       try {
@@ -986,7 +1089,6 @@ ${urgente ? '⏰ *Su caso es urgente, no demore.*' : 'O escriba *HOLA* para rein
           console.log(`   🔗 ${cli.nombre}: ${lid} → ${tel}`);
         }
       } catch (e) {}
-      // Pequeño delay para no saturar
       await new Promise(r => setTimeout(r, 500));
     }
     console.log(`🔗 LIDs mapeados: ${this.lidMap.size}`);
@@ -1017,11 +1119,19 @@ ${urgente ? '⏰ *Su caso es urgente, no demore.*' : 'O escriba *HOLA* para rein
     } catch (e) {}
   }
 
+  // Reset manual del lidMap (útil si queda mal mapeado sin recargar cartera)
+  resetLidMap() {
+    const cantidad = this.lidMap.size;
+    this.lidMap.clear();
+    console.log(`🧹 LidMap reseteado (${cantidad} entradas eliminadas)`);
+    return cantidad;
+  }
+
   getEstadisticas() {
     return {
       clientesRegistrados: this.clientes.size,
       conversacionesActivas: this.conversaciones.size,
-      interaccionesHoy: this.interacciones.filter(i => 
+      interaccionesHoy: this.interacciones.filter(i =>
         new Date(i.timestamp).toDateString() === new Date().toDateString()
       ).length,
       gestores: this.gestores,
