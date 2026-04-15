@@ -534,6 +534,119 @@ app.get('/api/exportar/reporte', (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════
+// INTEGRACION FANTASMA-RPGH (NUEVO)
+// Endpoints para que el sistema de seguimiento de fantasmas
+// pueda enviar mensajes individuales via este bot.
+// ═══════════════════════════════════════════════════════════
+
+/**
+ * GET /api/status
+ * Health check publico para que fantasma-rpgh sepa si el bot esta conectado.
+ * Sin autenticacion (es solo lectura de estado).
+ */
+app.get('/api/status', (req, res) => {
+  try {
+    res.json({
+      ok: true,
+      conectado: whatsappService.isConnected(),
+      chatbotActivo: chatbot.activo || false,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+/**
+ * POST /api/enviar-individual
+ * Endpoint AUTENTICADO para enviar UN mensaje desde otro servicio.
+ * 
+ * Headers requeridos:
+ *   Content-Type: application/json
+ *   Authorization: Bearer <BOT_API_TOKEN>
+ * 
+ * Body: { "telefono": "525512345678", "mensaje": "Hola..." }
+ * 
+ * Configurar variable de entorno BOT_API_TOKEN en Render.
+ */
+app.post('/api/enviar-individual', async (req, res) => {
+  try {
+    // 1. Validar token
+    const tokenEsperado = process.env.BOT_API_TOKEN;
+    if (!tokenEsperado) {
+      return res.status(500).json({ 
+        success: false, 
+        error: 'BOT_API_TOKEN no configurado en variables de entorno' 
+      });
+    }
+    
+    const authHeader = req.headers.authorization || '';
+    const tokenRecibido = authHeader.replace(/^Bearer\s+/i, '').trim();
+    
+    if (tokenRecibido !== tokenEsperado) {
+      console.warn('[API] Intento de envio con token invalido');
+      return res.status(401).json({ 
+        success: false, 
+        error: 'Token invalido' 
+      });
+    }
+    
+    // 2. Validar parametros
+    const { telefono, mensaje } = req.body;
+    
+    if (!telefono || !mensaje) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'telefono y mensaje son requeridos' 
+      });
+    }
+    
+    // 3. Verificar que WhatsApp este conectado
+    if (!whatsappService.isConnected()) {
+      return res.status(503).json({ 
+        success: false, 
+        error: 'WhatsApp no conectado. Escanea el QR primero.' 
+      });
+    }
+    
+    // 4. Enviar mensaje usando el servicio existente
+    console.log('[API] Enviando a ' + telefono + ': ' + String(mensaje).substring(0, 50) + '...');
+    
+    const resultado = await whatsappService.enviarMensaje(telefono, mensaje);
+    
+    // 5. Registrar interaccion en el chatbot (para que aparezca en logs)
+    try {
+      if (resultado && (resultado.exito === true || resultado.success === true)) {
+        chatbot.registrarInteraccion(
+          telefono, 
+          'enviado', 
+          '[Fantasma] ' + String(mensaje).substring(0, 50),
+          telefono + '@s.whatsapp.net'
+        );
+      }
+    } catch(e) { /* no romper si falla el log */ }
+    
+    // 6. Respuesta uniforme con success
+    const exito = resultado && (resultado.exito === true || resultado.success === true);
+    
+    res.json({
+      success: exito,
+      message: exito ? 'Mensaje enviado' : 'Falla al enviar',
+      detalle: resultado,
+      telefono: telefono,
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (error) {
+    console.error('[API] Error en /api/enviar-individual:', error.message);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════
 // HEALTH CHECK
 // ═══════════════════════════════════════════════════════════
 
