@@ -647,6 +647,114 @@ app.post('/api/enviar-individual', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════
+// VERIFICAR SI NUMERO EXISTE EN WHATSAPP
+// ═══════════════════════════════════════════════════════════
+
+/**
+ * POST /api/verificar-numero
+ * Verifica si un numero tiene WhatsApp.
+ * Body: { "telefono": "5512345678" }
+ * Respuesta: { "success": true, "existe": true/false, "telefono": "..." }
+ */
+app.post('/api/verificar-numero', async (req, res) => {
+  try {
+    const tokenEsperado = process.env.BOT_API_TOKEN;
+    if (tokenEsperado) {
+      const authHeader = req.headers.authorization || '';
+      const tokenRecibido = authHeader.replace(/^Bearer\s+/i, '').trim();
+      if (tokenRecibido !== tokenEsperado) {
+        return res.status(401).json({ success: false, error: 'Token invalido' });
+      }
+    }
+
+    const { telefono } = req.body;
+    if (!telefono) {
+      return res.status(400).json({ success: false, error: 'telefono requerido' });
+    }
+
+    if (!whatsappService.isConnected()) {
+      return res.status(503).json({ success: false, error: 'WhatsApp no conectado' });
+    }
+
+    const jid = whatsappService.formatearNumero(telefono);
+    const numero = jid.split('@')[0];
+
+    try {
+      const [result] = await whatsappService.sock.onWhatsApp(numero);
+      const existe = !!(result && result.exists);
+      res.json({ success: true, existe, telefono, jid: result?.jid || jid });
+    } catch (e) {
+      res.json({ success: true, existe: false, telefono, error: e.message });
+    }
+
+  } catch (error) {
+    console.error('[API] Error verificar-numero:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * POST /api/verificar-lote
+ * Verifica multiples numeros. Delay de 2s entre cada uno para no disparar alarmas.
+ * Body: { "telefonos": ["5512345678", "5598765432", ...] }
+ * Respuesta: { "success": true, "resultados": [{ "telefono": "...", "existe": true/false }, ...] }
+ * Max 50 numeros por llamada para evitar timeout.
+ */
+app.post('/api/verificar-lote', async (req, res) => {
+  try {
+    const tokenEsperado = process.env.BOT_API_TOKEN;
+    if (tokenEsperado) {
+      const authHeader = req.headers.authorization || '';
+      const tokenRecibido = authHeader.replace(/^Bearer\s+/i, '').trim();
+      if (tokenRecibido !== tokenEsperado) {
+        return res.status(401).json({ success: false, error: 'Token invalido' });
+      }
+    }
+
+    const { telefonos } = req.body;
+    if (!telefonos || !Array.isArray(telefonos) || telefonos.length === 0) {
+      return res.status(400).json({ success: false, error: 'telefonos (array) requerido' });
+    }
+
+    if (telefonos.length > 50) {
+      return res.status(400).json({ success: false, error: 'Maximo 50 numeros por llamada' });
+    }
+
+    if (!whatsappService.isConnected()) {
+      return res.status(503).json({ success: false, error: 'WhatsApp no conectado' });
+    }
+
+    const resultados = [];
+    for (let i = 0; i < telefonos.length; i++) {
+      const tel = telefonos[i];
+      try {
+        const jid = whatsappService.formatearNumero(tel);
+        const numero = jid.split('@')[0];
+        const [result] = await whatsappService.sock.onWhatsApp(numero);
+        resultados.push({ telefono: tel, existe: !!(result && result.exists) });
+      } catch (e) {
+        resultados.push({ telefono: tel, existe: false, error: e.message });
+      }
+
+      // Delay 2s entre verificaciones para no disparar alarmas
+      if (i < telefonos.length - 1) {
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    }
+
+    const conWhatsApp = resultados.filter(r => r.existe).length;
+    const sinWhatsApp = resultados.filter(r => !r.existe).length;
+    console.log(`[API] Verificacion lote: ${conWhatsApp} con WA, ${sinWhatsApp} sin WA (de ${telefonos.length})`);
+
+    res.json({ success: true, resultados, conWhatsApp, sinWhatsApp, total: telefonos.length });
+
+  } catch (error) {
+    console.error('[API] Error verificar-lote:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════
 // HEALTH CHECK
 // ═══════════════════════════════════════════════════════════
 
