@@ -310,11 +310,17 @@ class WhatsAppService {
 
   formatearNumero(telefono) {
     let limpio = String(telefono).replace(/\D/g, '');
-    if (limpio.startsWith('52') && limpio.length === 12) {
+    // Si ya tiene 521 + 10 digitos (13 total) → listo
+    if (limpio.startsWith('521') && limpio.length === 13) {
       return limpio + '@s.whatsapp.net';
     }
+    // Si tiene 52 + 10 digitos (12 total) sin el 1 → agregar 1
+    if (limpio.startsWith('52') && limpio.length === 12) {
+      return '521' + limpio.slice(2) + '@s.whatsapp.net';
+    }
+    // Si tiene 10 digitos → agregar 521
     if (limpio.length === 10) {
-      return '52' + limpio + '@s.whatsapp.net';
+      return '521' + limpio + '@s.whatsapp.net';
     }
     return limpio + '@s.whatsapp.net';
   }
