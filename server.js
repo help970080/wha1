@@ -60,6 +60,46 @@ setInterval(() => {
   if (whatsappService.isConnected() && !chatbotIniciado) {
     chatbot.iniciar();
     chatbotIniciado = true;
+    
+    // Registrar handler de mensajes ENTRANTES (respuestas de clientes)
+    whatsappService.onMessage(async (msg) => {
+      try {
+        const remoteJid = msg.key.remoteJid;
+        const telefono = remoteJid.split('@')[0].replace(/^521?/, '');
+        const texto = msg.message?.conversation 
+          || msg.message?.extendedTextMessage?.text 
+          || msg.message?.imageMessage?.caption
+          || '[media]';
+        const nombre = msg.pushName || telefono;
+        
+        console.log(`📩 Respuesta de ${nombre} (${telefono}): ${texto.substring(0, 80)}`);
+        
+        // Registrar en chatbot local
+        chatbot.registrarInteraccion(telefono, 'recibido', texto, remoteJid);
+        
+        // Notificar al panel fantasmas (guardar en seguimiento_log)
+        const FANTASMA_URL = process.env.CHATBOT_BAILEYS_URL || '';
+        // Derivar URL base del panel desde CHATBOT_BAILEYS_URL
+        const panelBase = FANTASMA_URL.replace('/api/enviar-individual', '');
+        
+        if (panelBase) {
+          try {
+            await fetch(panelBase + '/api/respuesta-cliente', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                telefono: telefono,
+                mensaje: texto.substring(0, 500),
+                nombre: nombre,
+                timestamp: new Date().toISOString()
+              })
+            });
+          } catch(e) { /* silencioso si el panel no responde */ }
+        }
+      } catch(e) {
+        console.error('Error procesando mensaje entrante:', e.message);
+      }
+    });
   }
 }, 3000);
 
