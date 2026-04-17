@@ -68,17 +68,29 @@ setInterval(() => {
         let telefono = remoteJid.split('@')[0];
         
         // Resolver LID a telefono real
-        // Primero: buscar en el mapa LID del whatsappService (se llena al enviar)
-        const lidResuelto = whatsappService.resolverLID(telefono);
+        // Primero: buscar en el mapa LID del whatsappService
+        let lidResuelto = whatsappService.resolverLID(telefono);
         if (lidResuelto) {
           console.log(`🔗 LID ${telefono} resuelto a ${lidResuelto} via lidMap`);
           telefono = lidResuelto;
         } else if (telefono.length > 13 || !telefono.match(/^52[1-9]/)) {
-          // Segundo: buscar en chatbot
-          const telResuelto = chatbot.resolverTelefono ? chatbot.resolverTelefono(telefono) : null;
-          if (telResuelto) {
-            console.log(`🔗 LID ${telefono} resuelto a ${telResuelto} via chatbot`);
-            telefono = telResuelto;
+          // Segundo: si hay un envio reciente (ultimos 5 min), asumir que esta respuesta es de ese numero
+          const ultimoEnvio = whatsappService.ultimoEnvio;
+          if (ultimoEnvio && (Date.now() - ultimoEnvio.timestamp) < 300000) {
+            console.log(`🔗 LID ${telefono} asociado a ultimo envio: ${ultimoEnvio.tel10} (hace ${Math.round((Date.now() - ultimoEnvio.timestamp)/1000)}s)`);
+            // Guardar este LID para futuras respuestas
+            whatsappService.lidMap.set(telefono, ultimoEnvio.tel10);
+            telefono = ultimoEnvio.tel10;
+          } else {
+            // Tercero: buscar en chatbot
+            const telResuelto = chatbot.resolverTelefono ? chatbot.resolverTelefono(telefono) : null;
+            if (telResuelto) {
+              console.log(`🔗 LID ${telefono} resuelto a ${telResuelto} via chatbot`);
+              whatsappService.lidMap.set(telefono, telResuelto);
+              telefono = telResuelto;
+            } else {
+              console.log(`⚠️ No se pudo resolver LID ${telefono} - se guarda tal cual`);
+            }
           }
         }
         
