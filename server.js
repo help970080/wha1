@@ -65,33 +65,65 @@ setInterval(() => {
     whatsappService.onMessage(async (msg) => {
       try {
         const remoteJid = msg.key.remoteJid;
-        const telefono = remoteJid.split('@')[0].replace(/^521?/, '');
+        let telefono = remoteJid.split('@')[0];
+        
+        // Resolver LID a telefono real si es necesario
+        // LIDs son numeros largos que no empiezan con codigo de pais normal
+        if (telefono.length > 13 || !telefono.match(/^52[1-9]/)) {
+          // Intentar buscar en el mapa de LIDs del chatbot
+          const telResuelto = chatbot.resolverTelefono ? chatbot.resolverTelefono(telefono) : null;
+          if (telResuelto) {
+            telefono = telResuelto;
+          } else {
+            // Buscar por contacto en WhatsApp
+            try {
+              const contact = await whatsappService.sock.onWhatsApp(telefono);
+              if (contact && contact[0] && contact[0].jid) {
+                telefono = contact[0].jid.split('@')[0];
+              }
+            } catch(e) { /* no se pudo resolver */ }
+          }
+        }
+        
+        // Limpiar: quitar 521 o 52 para dejar 10 digitos
+        let tel10 = telefono.replace(/\D/g, '');
+        if (tel10.startsWith('521') && tel10.length === 13) tel10 = tel10.slice(3);
+        else if (tel10.startsWith('52') && tel10.length === 12) tel10 = tel10.slice(2);
+        
         const texto = msg.message?.conversation 
           || msg.message?.extendedTextMessage?.text 
           || msg.message?.imageMessage?.caption
           || '[media]';
-        const nombre = msg.pushName || telefono;
+        const nombre = msg.pushName || tel10;
         
-        console.log(`📩 Respuesta de ${nombre} (${telefono}): ${texto.substring(0, 80)}`);
+        console.log(`📩 Respuesta de ${nombre} (${tel10}): ${texto.substring(0, 80)}`);
         
         // Registrar en chatbot local
-        chatbot.registrarInteraccion(telefono, 'recibido', texto, remoteJid);
+        chatbot.registrarInteraccion(tel10, 'recibido', texto, remoteJid);
         
         // Notificar al panel fantasmas (guardar en seguimiento_log)
         const panelBase = process.env.FANTASMA_PANEL_URL || 'https://fantasma-rpgh.onrender.com';
         
         try {
-          await fetch(panelBase + '/api/respuesta-cliente', {
+          const resp = await fetch(panelBase + '/api/respuesta-cliente', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
-                telefono: telefono,
+                telefono: tel10,
                 mensaje: texto.substring(0, 500),
                 nombre: nombre,
                 timestamp: new Date().toISOString()
               })
             });
-          } catch(e) { /* silencioso si el panel no responde */ }
+          const respData = await resp.json();
+          if (respData.success) {
+            console.log(`✅ Respuesta de ${tel10} guardada en panel fantasmas`);
+          } else {
+            console.log(`❌ Panel fantasmas rechazó: ${respData.error || 'unknown'}`);
+          }
+        } catch(e) {
+          console.log(`❌ Error enviando respuesta al panel: ${e.message}`);
+        }
       } catch(e) {
         console.error('Error procesando mensaje entrante:', e.message);
       }
