@@ -354,14 +354,18 @@ class WhatsAppService {
       const sentMsg = await this.sock.sendMessage(jid, { text: mensaje });
       
       // Guardar relacion LID → telefono para resolver respuestas
+      let tel10 = String(telefono).replace(/\D/g, '');
+      if (tel10.startsWith('521') && tel10.length === 13) tel10 = tel10.slice(3);
+      else if (tel10.startsWith('52') && tel10.length === 12) tel10 = tel10.slice(2);
+      
       if (sentMsg && sentMsg.key && sentMsg.key.remoteJid) {
         const lid = sentMsg.key.remoteJid.split('@')[0];
-        let tel10 = String(telefono).replace(/\D/g, '');
-        if (tel10.startsWith('521') && tel10.length === 13) tel10 = tel10.slice(3);
-        else if (tel10.startsWith('52') && tel10.length === 12) tel10 = tel10.slice(2);
         this.lidMap.set(lid, tel10);
         console.log(`🔗 LID mapeado: ${lid} → ${tel10}`);
       }
+      
+      // Guardar ultimo envio para resolver LID por proximidad temporal
+      this.ultimoEnvio = { tel10, timestamp: Date.now() };
       
       console.log(`✅ Mensaje enviado a ${telefono}`);
       return { exito: true, telefono };
