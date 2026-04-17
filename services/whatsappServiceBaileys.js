@@ -28,6 +28,7 @@ class WhatsAppService {
     this.maxReconnectAttempts = 5;
     this.onMessageCallback = null;
     this.initializing = false;
+    this.lidMap = new Map(); // LID → telefono (10 digitos)
     this.authDir = './auth_session';
   }
 
@@ -290,6 +291,11 @@ class WhatsAppService {
     };
   }
 
+  // Resolver LID a telefono de 10 digitos
+  resolverLID(lid) {
+    return this.lidMap.get(lid) || null;
+  }
+
   async getInfoSesion() {
     if (!this.connected || !this.sock || !this.sock.user) {
       return null;
@@ -345,7 +351,17 @@ class WhatsAppService {
         // Si la verificacion falla, intentamos enviar de todas formas
       }
       
-      await this.sock.sendMessage(jid, { text: mensaje });
+      const sentMsg = await this.sock.sendMessage(jid, { text: mensaje });
+      
+      // Guardar relacion LID → telefono para resolver respuestas
+      if (sentMsg && sentMsg.key && sentMsg.key.remoteJid) {
+        const lid = sentMsg.key.remoteJid.split('@')[0];
+        let tel10 = String(telefono).replace(/\D/g, '');
+        if (tel10.startsWith('521') && tel10.length === 13) tel10 = tel10.slice(3);
+        else if (tel10.startsWith('52') && tel10.length === 12) tel10 = tel10.slice(2);
+        this.lidMap.set(lid, tel10);
+        console.log(`🔗 LID mapeado: ${lid} → ${tel10}`);
+      }
       
       console.log(`✅ Mensaje enviado a ${telefono}`);
       return { exito: true, telefono };
