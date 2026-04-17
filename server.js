@@ -78,13 +78,10 @@ setInterval(() => {
         chatbot.registrarInteraccion(telefono, 'recibido', texto, remoteJid);
         
         // Notificar al panel fantasmas (guardar en seguimiento_log)
-        const FANTASMA_URL = process.env.CHATBOT_BAILEYS_URL || '';
-        // Derivar URL base del panel desde CHATBOT_BAILEYS_URL
-        const panelBase = FANTASMA_URL.replace('/api/enviar-individual', '');
+        const panelBase = process.env.FANTASMA_PANEL_URL || 'https://fantasma-rpgh.onrender.com';
         
-        if (panelBase) {
-          try {
-            await fetch(panelBase + '/api/respuesta-cliente', {
+        try {
+          await fetch(panelBase + '/api/respuesta-cliente', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
@@ -95,7 +92,6 @@ setInterval(() => {
               })
             });
           } catch(e) { /* silencioso si el panel no responde */ }
-        }
       } catch(e) {
         console.error('Error procesando mensaje entrante:', e.message);
       }
