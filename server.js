@@ -67,21 +67,18 @@ setInterval(() => {
         const remoteJid = msg.key.remoteJid;
         let telefono = remoteJid.split('@')[0];
         
-        // Resolver LID a telefono real si es necesario
-        // LIDs son numeros largos que no empiezan con codigo de pais normal
-        if (telefono.length > 13 || !telefono.match(/^52[1-9]/)) {
-          // Intentar buscar en el mapa de LIDs del chatbot
+        // Resolver LID a telefono real
+        // Primero: buscar en el mapa LID del whatsappService (se llena al enviar)
+        const lidResuelto = whatsappService.resolverLID(telefono);
+        if (lidResuelto) {
+          console.log(`🔗 LID ${telefono} resuelto a ${lidResuelto} via lidMap`);
+          telefono = lidResuelto;
+        } else if (telefono.length > 13 || !telefono.match(/^52[1-9]/)) {
+          // Segundo: buscar en chatbot
           const telResuelto = chatbot.resolverTelefono ? chatbot.resolverTelefono(telefono) : null;
           if (telResuelto) {
+            console.log(`🔗 LID ${telefono} resuelto a ${telResuelto} via chatbot`);
             telefono = telResuelto;
-          } else {
-            // Buscar por contacto en WhatsApp
-            try {
-              const contact = await whatsappService.sock.onWhatsApp(telefono);
-              if (contact && contact[0] && contact[0].jid) {
-                telefono = contact[0].jid.split('@')[0];
-              }
-            } catch(e) { /* no se pudo resolver */ }
           }
         }
         
