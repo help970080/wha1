@@ -434,38 +434,80 @@ class EnvioMasivoService {
     const telefono = contacto.telefono;
 
     try {
-      // 1. Verificar número en WhatsApp y obtener JID correcto
+      // ════════════════════════════════════════════════════════════
+      // 1. VERIFICAR NUMERO (con cache 24h del servicio)
+      // ════════════════════════════════════════════════════════════
+      // En vez de llamar onWhatsApp directo cada vez, usamos el cache
+      // del servicio. Si ya validamos a este cliente en las ultimas 24h
+      // no hacemos query nueva (banderas rojas para WhatsApp).
+      const numFormateado = telefono.length === 10 ? '521' + telefono : telefono;
       let jid;
-      try {
-        const numFormateado = telefono.length === 10 ? '52' + telefono : telefono;
-        const [resultado] = await this.whatsapp.sock.onWhatsApp(numFormateado);
-        if (resultado?.exists) {
-          jid = resultado.jid;
-          console.log(`   🔍 Verificado: ${telefono} → ${jid}`);
-        } else {
+      
+      // Si el servicio tiene el helper cacheado lo usamos, si no fallback
+      if (typeof this.whatsapp.numeroExisteEnWA === 'function') {
+        const existe = await this.whatsapp.numeroExisteEnWA(numFormateado);
+        if (!existe) {
           throw new Error('Número no tiene WhatsApp');
         }
-      } catch (verifyError) {
-        // Fallback al formato normal si onWhatsApp falla
-        if (verifyError.message === 'Número no tiene WhatsApp') throw verifyError;
         jid = this.whatsapp.formatearNumero(telefono);
-        console.log(`   ⚠️ Sin verificar, usando: ${jid}`);
+        console.log(`   🔍 ${telefono} → ${jid} (cache)`);
+      } else {
+        // Fallback para compatibilidad
+        try {
+          const [resultado] = await this.whatsapp.sock.onWhatsApp(numFormateado);
+          if (resultado?.exists) {
+            jid = resultado.jid;
+          } else {
+            throw new Error('Número no tiene WhatsApp');
+          }
+        } catch (verifyError) {
+          if (verifyError.message === 'Número no tiene WhatsApp') throw verifyError;
+          jid = this.whatsapp.formatearNumero(telefono);
+        }
       }
 
-      // 2. Simular presencia "en línea"
+      // ════════════════════════════════════════════════════════════
+      // 2. SECUENCIA DE PRESENCIA HUMANA (anti-baneo critico)
+      // ════════════════════════════════════════════════════════════
+      // Un humano: abre WA → ve "en linea" → abre el chat (lee 1-2s)
+      // → empieza a escribir → escribe → pausa → envia → cierra
+      
+      // Fase A: marcar "en linea"
       try {
         await this.whatsapp.sock.sendPresenceUpdate('available');
       } catch (e) {}
-
-      // 3. Simular "escribiendo..."
+      
+      // Fase B: pausa "leyendo el chat" (300-1200ms gaussiano)
+      const lecturaMs = 300 + Math.round(Math.random() * 900);
+      await this._sleep(lecturaMs);
+      
+      // Fase C: empezar a "escribir"
       try {
         await this.whatsapp.sock.sendPresenceUpdate('composing', jid);
       } catch (e) {}
-      
-      const typingDelay = this.getDelayTyping();
-      await this._sleep(typingDelay);
 
-      // 3. Enviar mensaje (con timeout de 60s para evitar que se trabe)
+      // Fase D: tiempo de typing PROPORCIONAL al largo del mensaje
+      // (lo que faltaba — antes era fijo)
+      const textoMensaje = imagen 
+        ? (plantilla ? this.personalizarMensaje(plantilla, contacto) : '')
+        : this.personalizarMensaje(plantilla, contacto);
+      const largoTexto = textoMensaje.length;
+      // ~50-90 chars/seg de tipeo humano + variacion
+      let tiempoTipeo = Math.min(Math.max(largoTexto * 18, 1500), 6500);
+      tiempoTipeo += (Math.random() * 1500 - 750); // ±750ms
+      await this._sleep(Math.round(tiempoTipeo));
+
+      // Fase E: pausar typing antes de enviar (humano deja de escribir)
+      try {
+        await this.whatsapp.sock.sendPresenceUpdate('paused', jid);
+      } catch (e) {}
+      
+      // Pequena pausa "revisando el mensaje" antes de mandar
+      await this._sleep(200 + Math.round(Math.random() * 400));
+
+      // ════════════════════════════════════════════════════════════
+      // 3. ENVIAR (con timeout de 60s para evitar que se trabe)
+      // ════════════════════════════════════════════════════════════
       const enviarConTimeout = (msgContent) => {
         return Promise.race([
           this.whatsapp.sock.sendMessage(jid, msgContent),
@@ -498,14 +540,26 @@ class EnvioMasivoService {
           caption: caption,
         });
       } else {
-        const mensaje = this.personalizarMensaje(plantilla, contacto);
-        sendResult = await enviarConTimeout({ text: mensaje });
+        sendResult = await enviarConTimeout({ text: textoMensaje });
       }
 
-      // 4. Volver a "paused" (no disponible constantemente)
-      try {
-        await this.whatsapp.sock.sendPresenceUpdate('paused', jid);
-      } catch (e) {}
+      // ════════════════════════════════════════════════════════════
+      // 4. POST-ENVIO: cachear mensaje + volver a "no en linea"
+      // ════════════════════════════════════════════════════════════
+      // Cache para getMessage retries (anti-baneo critico)
+      if (sendResult?.key?.id && typeof this.whatsapp.cacheMensaje === 'function') {
+        this.whatsapp.cacheMensaje(sendResult.key.id, { 
+          conversation: textoMensaje 
+        });
+      }
+      
+      // Volver a "unavailable" en background (humano cierra WhatsApp)
+      // No bloqueamos el flujo, lo hacemos en setTimeout
+      setTimeout(async () => {
+        try { 
+          await this.whatsapp.sock.sendPresenceUpdate('unavailable'); 
+        } catch (e) {}
+      }, 2000 + Math.random() * 3000);
 
       // Actualizar estado
       item.estado = 'enviado';
