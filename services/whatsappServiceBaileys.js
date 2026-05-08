@@ -150,12 +150,12 @@ class WhatsAppService {
         shouldSyncHistoryMessage: () => false,
         // ✅ Ignorar grupos/newsletters/status → comportamiento de usuario
         // que solo usa mensajes directos (mas natural para cobranza)
+        // IMPORTANTE: si no hay jid (eventos del sistema/QR), NO ignorar
         shouldIgnoreJid: (jid) => {
-          if (!jid) return true;
+          if (!jid) return false; // eventos sin JID son del sistema, dejarlos pasar
           return jid.includes('@g.us') ||           // grupos
                  jid.includes('@newsletter') ||      // canales
-                 jid.includes('@broadcast') ||       // status/broadcasts
-                 jid === 'status@broadcast';
+                 jid === 'status@broadcast';        // solo el broadcast de status
         },
         // ✅ getMessage REAL — devuelve el mensaje cacheado para retries.
         // WhatsApp pide retries de mensajes "perdidos"; un cliente real
