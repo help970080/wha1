@@ -12,43 +12,11 @@
  *   - Logger mejorado para debugging del QR
  */
 
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, Browsers, makeCacheableSignalKeyStore } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const qrcode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
-const { randomBytes } = require('crypto');
-
-// ════════════════════════════════════════════════════════════════
-// ANTI-BANEO: Pool de browser fingerprints reales rotativos.
-// WhatsApp tiene marcado el string ['Mac OS','Safari','14.4.1'] que
-// se usa en todos los tutoriales de Baileys. Rotamos entre fingerprints
-// de equipos REALES para que cada reconexion parezca un dispositivo
-// distinto registrandose como linked device.
-// ════════════════════════════════════════════════════════════════
-const BROWSER_POOL = [
-  ['Ubuntu', 'Chrome', '120.0.6099.129'],
-  ['Windows', 'Chrome', '121.0.6167.85'],
-  ['Windows', 'Edge', '120.0.2210.91'],
-  ['Linux',   'Firefox', '122.0'],
-  ['Ubuntu',  'Firefox', '121.0'],
-  ['Mac OS',  'Chrome', '120.0.6099.234']
-];
-
-function pickBrowser(authDir) {
-  // Hash determinista por carpeta de auth → mismo dispositivo siempre
-  // que la sesion siga viva, distinto cuando reescaneas QR.
-  try {
-    const credPath = path.join(authDir, 'creds.json');
-    if (fs.existsSync(credPath)) {
-      const stat = fs.statSync(credPath);
-      const idx = Math.abs(parseInt(stat.birthtimeMs.toString().slice(-3))) % BROWSER_POOL.length;
-      return BROWSER_POOL[idx];
-    }
-  } catch(e) {}
-  // Auth nueva → random
-  return BROWSER_POOL[Math.floor(Math.random() * BROWSER_POOL.length)];
-}
 
 class WhatsAppService {
   constructor() {
@@ -62,11 +30,11 @@ class WhatsAppService {
     this.initializing = false;
     this.lidMap = new Map(); // LID → telefono (10 digitos)
     this.authDir = './auth_session';
-    // Cache de mensajes enviados para getMessage (anti-baneo critico)
-    this.sentMsgCache = new Map(); // msgId → mensaje
+    // Cache para getMessage retries (anti-baneo)
+    this.sentMsgCache = new Map();
     this.maxCacheSize = 500;
-    // Cache de numeros ya verificados con onWhatsApp (evita repetir queries)
-    this.onWhatsAppCache = new Map(); // numero → { exists, ts }
+    // Cache de validaciones onWhatsApp (24h)
+    this.onWhatsAppCache = new Map();
   }
 
   /**
@@ -111,87 +79,41 @@ class WhatsAppService {
       const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
       
       // ════════════════════════════════════════════════════════════
-      // VERSION PINNED — NO usamos fetchLatestBaileysVersion()
+      // VERSION CRITICA: WhatsApp rechaza versiones viejas con error 405
+      // (Bug conocido de Baileys - issue #2376)
+      // fetchLatestBaileysVersion() devuelve una version obsoleta que
+      // ya no acepta WhatsApp. Hardcodeamos la version actual de WhatsApp
+      // Web (consultar https://wppconnect.io/whatsapp-versions/ si vuelve
+      // a fallar con 405 - actualizar este numero).
       // ════════════════════════════════════════════════════════════
-      // fetchLatestBaileysVersion() devuelve la version mas reciente
-      // que Baileys soporta, NO la version oficial de WhatsApp Web.
-      // WhatsApp tiene marcadas ciertas combinaciones de version+browser
-      // que delatan a Baileys. Pineamos una version real de WhatsApp Web
-      // que esta vigente y es de dispositivos masivos (mas dificil de
-      // distinguir de un cliente real).
-      const version = [2, 3000, 1027406613];
-      console.log(`📌 Baileys version (pinned): ${version.join('.')}`);
+      const version = [2, 3000, 1039102240]; // 8 mayo 2026 - alpha stable
+      console.log(`📌 Baileys version (manual): ${version.join('.')}`);
 
-      // Browser fingerprint rotativo (ver pool arriba)
-      const browser = pickBrowser(this.authDir);
-      console.log(`🖥️  Browser fingerprint: ${browser.join(' / ')}`);
-
-      // CONFIGURACION ANTI-BANEO v3
+      // CONFIGURACION ARREGLADA — sin printQRInTerminal, browser compatible
       this.sock = makeWASocket({
         version,
-        auth: {
-          creds: state.creds,
-          // ✅ Cache de signal keys → reduce trafico y queries internas
-          keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' }))
-        },
+        auth: state,
+        // ❌ printQRInTerminal: ELIMINADO (deprecado, causaba 403)
         logger: pino({ level: 'silent' }),
-        // ✅ Browser rotativo desde pool (ver arriba)
-        browser,
+        // ✅ Browser string compatible con WhatsApp Web actual
+        browser: ['Ubuntu', 'Chrome', '120.0.6099.129'],
         connectTimeoutMs: 60000,
         defaultQueryTimeoutMs: 60000,
         keepAliveIntervalMs: 25000,
-        // ✅ markOnlineOnConnect: false → no aparecer "en linea" al conectar
+        // ✅ markOnlineOnConnect: false → anti-baneo
         markOnlineOnConnect: false,
         emitOwnEvents: false,
         generateHighQualityLinkPreview: false,
         syncFullHistory: false,
-        retryRequestDelayMs: 2500,
-        // ✅ No descargar historial → menos trafico sospechoso
+        retryRequestDelayMs: 2000,
+        // Necesario para cargar mensajes correctamente
         shouldSyncHistoryMessage: () => false,
-        // ✅ Ignorar grupos/newsletters/status → comportamiento de usuario
-        // que solo usa mensajes directos (mas natural para cobranza)
-        // IMPORTANTE: si no hay jid (eventos del sistema/QR), NO ignorar
-        shouldIgnoreJid: (jid) => {
-          if (!jid) return false; // eventos sin JID son del sistema, dejarlos pasar
-          return jid.includes('@g.us') ||           // grupos
-                 jid.includes('@newsletter') ||      // canales
-                 jid === 'status@broadcast';        // solo el broadcast de status
-        },
-        // ✅ getMessage REAL — devuelve el mensaje cacheado para retries.
-        // WhatsApp pide retries de mensajes "perdidos"; un cliente real
-        // los puede regenerar, un bot que devuelve undefined se delata.
+        // ✅ getMessage real - devuelve mensajes cacheados para retries
         getMessage: async (key) => {
           if (key?.id && this.sentMsgCache.has(key.id)) {
             return this.sentMsgCache.get(key.id);
           }
-          // Si no tenemos el mensaje, devolver objeto vacio en vez de undefined
           return { conversation: '' };
-        },
-        // ✅ Transaction options — comportamiento mas natural
-        transactionOpts: {
-          maxCommitRetries: 5,
-          delayBetweenTriesMs: 3000
-        },
-        // ✅ Patch para que mensajes salientes vayan en formato
-        // que clientes oficiales usan
-        patchMessageBeforeSending: (msg) => {
-          const requiresPatch = !!(
-            msg.buttonsMessage || msg.templateMessage || msg.listMessage
-          );
-          if (requiresPatch) {
-            msg = {
-              viewOnceMessage: {
-                message: {
-                  messageContextInfo: {
-                    deviceListMetadataVersion: 2,
-                    deviceListMetadata: {}
-                  },
-                  ...msg
-                }
-              }
-            };
-          }
-          return msg;
         }
       });
 
@@ -418,20 +340,9 @@ class WhatsAppService {
     return limpio + '@s.whatsapp.net';
   }
 
-  // Guardar mensaje en cache (para getMessage en retries de WhatsApp)
-  cacheMensaje(msgId, contenido) {
-    if (this.sentMsgCache.size >= this.maxCacheSize) {
-      // Eliminar el mas viejo (FIFO)
-      const firstKey = this.sentMsgCache.keys().next().value;
-      this.sentMsgCache.delete(firstKey);
-    }
-    this.sentMsgCache.set(msgId, contenido);
-  }
-
-  // Verificacion CACHEADA de onWhatsApp (evita queries repetidas)
+  // Cache de validaciones onWhatsApp (24h)
   async numeroExisteEnWA(numeroSinAt) {
     const cached = this.onWhatsAppCache.get(numeroSinAt);
-    // Cache valido por 24 horas
     if (cached && (Date.now() - cached.ts) < 86400000) {
       return cached.exists;
     }
@@ -441,22 +352,17 @@ class WhatsAppService {
       this.onWhatsAppCache.set(numeroSinAt, { exists, ts: Date.now() });
       return exists;
     } catch(e) {
-      // Si falla, asumimos que existe (no bloqueamos envio)
       return true;
     }
   }
 
-  // Delay humanoide (gaussiano centrado, no uniforme)
-  delayHumano(minMs, maxMs) {
-    // Box-Muller para distribucion gaussiana
-    const u1 = Math.random();
-    const u2 = Math.random();
-    const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
-    const mid = (minMs + maxMs) / 2;
-    const range = (maxMs - minMs) / 4; // 4-sigma cubre el rango
-    let ms = Math.round(mid + z * range);
-    ms = Math.max(minMs, Math.min(maxMs, ms));
-    return new Promise(r => setTimeout(r, ms));
+  // Guardar mensaje enviado en cache (para getMessage retries)
+  cacheMensaje(msgId, contenido) {
+    if (this.sentMsgCache.size >= this.maxCacheSize) {
+      const firstKey = this.sentMsgCache.keys().next().value;
+      this.sentMsgCache.delete(firstKey);
+    }
+    this.sentMsgCache.set(msgId, contenido);
   }
 
   async enviarMensaje(telefono, mensaje) {
@@ -468,55 +374,32 @@ class WhatsAppService {
       const jid = this.formatearNumero(telefono);
       const numeroSinAt = jid.split('@')[0];
       
-      // Verificar SOLO si no esta en cache (no en cada envio)
+      // Validar con cache 24h
       const existe = await this.numeroExisteEnWA(numeroSinAt);
       if (!existe) {
         console.log(`⚠️  ${telefono} no existe en WhatsApp`);
         return { exito: false, error: 'Numero no esta en WhatsApp', telefono };
       }
       
-      // ✅ ANTI-BANEO: Simular comportamiento humano antes de enviar
-      // 1) Marcar el chat como leido (lo que hace un humano cuando abre)
-      try {
-        await this.sock.sendPresenceUpdate('available');
-      } catch(e) {}
+      // Secuencia humana: leer → escribir → pausar → enviar → cerrar
+      try { await this.sock.sendPresenceUpdate('available'); } catch(e) {}
+      await new Promise(r => setTimeout(r, 300 + Math.random() * 900));
+      try { await this.sock.sendPresenceUpdate('composing', jid); } catch(e) {}
+      const tiempoTipeo = Math.min(Math.max(mensaje.length * 18, 1500), 6000);
+      await new Promise(r => setTimeout(r, tiempoTipeo + (Math.random() * 1500 - 750)));
+      try { await this.sock.sendPresenceUpdate('paused', jid); } catch(e) {}
       
-      // 2) Pequena pausa "leyendo" (300-1200ms)
-      await this.delayHumano(300, 1200);
-      
-      // 3) Empezar a "escribir" 
-      try {
-        await this.sock.sendPresenceUpdate('composing', jid);
-      } catch(e) {}
-      
-      // 4) Tiempo de "escritura" proporcional al largo del mensaje
-      // Aprox 50-90 caracteres por segundo de tipeo humano
-      const tiempoTipeo = Math.min(
-        Math.max(mensaje.length * 18, 1500), // min 1.5s
-        6000                                  // max 6s
-      );
-      const variacion = tiempoTipeo + (Math.random() * 1500 - 750);
-      await new Promise(r => setTimeout(r, variacion));
-      
-      // 5) Pausar typing antes de enviar (como humano)
-      try {
-        await this.sock.sendPresenceUpdate('paused', jid);
-      } catch(e) {}
-      
-      // 6) ENVIAR
       const sentMsg = await this.sock.sendMessage(jid, { text: mensaje });
       
-      // 7) Guardar en cache para getMessage
       if (sentMsg?.key?.id) {
         this.cacheMensaje(sentMsg.key.id, { conversation: mensaje });
       }
       
-      // 8) Volver a "no disponible" (no quedarse "en linea" perpetuamente)
       setTimeout(async () => {
         try { await this.sock.sendPresenceUpdate('unavailable'); } catch(e) {}
       }, 2000 + Math.random() * 3000);
       
-      // Guardar relacion LID → telefono para resolver respuestas
+      // LID mapping
       let tel10 = String(telefono).replace(/\D/g, '');
       if (tel10.startsWith('521') && tel10.length === 13) tel10 = tel10.slice(3);
       else if (tel10.startsWith('52') && tel10.length === 12) tel10 = tel10.slice(2);
@@ -527,7 +410,6 @@ class WhatsAppService {
         console.log(`🔗 LID mapeado: ${lid} → ${tel10}`);
       }
       
-      // Guardar ultimo envio para resolver LID por proximidad temporal
       this.ultimoEnvio = { tel10, timestamp: Date.now() };
       
       console.log(`✅ Mensaje enviado a ${telefono}`);
