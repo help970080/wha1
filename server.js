@@ -759,6 +759,58 @@ app.post('/api/enviar-individual', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════
+// v3.1 (2026-05): REGISTRAR CLIENTE SIN ENVIAR MENSAJE
+// ═══════════════════════════════════════════════════════════
+
+/**
+ * POST /api/registrar-cliente
+ * Permite a Fantasma (u otro sistema) registrar un cliente en la cartera
+ * del chatbot sin enviar mensaje. Esto sirve para que cuando el cliente
+ * conteste por su propia cuenta a un mensaje enviado por otro canal,
+ * el bot ya lo reconozca y dispare el flujo de convenio.
+ * 
+ * Headers: Authorization: Bearer <BOT_API_TOKEN>
+ * Body: { "telefono": "5512345678", "cliente": { "nombre": "...", "saldo": 8500, "diasAtraso": 73 } }
+ */
+app.post('/api/registrar-cliente', async (req, res) => {
+  try {
+    const tokenEsperado = process.env.BOT_API_TOKEN;
+    if (!tokenEsperado) {
+      return res.status(500).json({ success: false, error: 'BOT_API_TOKEN no configurado' });
+    }
+    const tokenRecibido = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+    if (tokenRecibido !== tokenEsperado) {
+      return res.status(401).json({ success: false, error: 'Token invalido' });
+    }
+    
+    const { telefono, cliente } = req.body;
+    if (!telefono || !cliente) {
+      return res.status(400).json({ success: false, error: 'telefono y cliente requeridos' });
+    }
+    
+    const registrado = chatbot.registrarCliente({
+      telefono,
+      nombre: cliente.nombre,
+      saldo: cliente.saldo,
+      diasAtraso: cliente.diasAtraso
+    });
+    
+    if (!registrado) {
+      return res.status(400).json({ success: false, error: 'No se pudo registrar (teléfono inválido?)' });
+    }
+    
+    res.json({
+      success: true,
+      message: 'Cliente registrado en cartera del bot',
+      cliente: registrado
+    });
+  } catch (error) {
+    console.error('[API] Error en /api/registrar-cliente:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════
 // VERIFICAR SI NUMERO EXISTE EN WHATSAPP
 // ═══════════════════════════════════════════════════════════
 
