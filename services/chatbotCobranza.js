@@ -48,6 +48,24 @@ class ChatBotCobranza {
       titular: 'Lic. Francisco Gabriel García Sánchez',
     };
 
+    // ═══════════════════════════════════════
+    // CONFIGURACIÓN DE CONVENIOS v3 (2026-05)
+    // ═══════════════════════════════════════
+    this.CONVENIO = {
+      // 2 planes por PISO MÍNIMO de pago semanal.
+      // El pago real puede ser >= al piso; se calcula buscando el máximo
+      // de semanas posibles sin que el pago caiga por debajo del piso.
+      planA_monto: 1000,   // Plan rápido (piso $1,000/sem)
+      planB_monto: 500,    // Plan accesible (piso $500/sem)
+      // Recargo si el plazo supera 4 semanas
+      semanasSinRecargo: 4,
+      recargo: 0.15,
+      // Si el saldo cabe en 4 semanas o menos con $1,000/sem -> pago único
+      umbralPagoUnico: 4000,
+      // URL pública del convenio prellenado (CAMBIAR cuando se confirme hosting)
+      urlConvenio: process.env.CONVENIO_URL || 'https://convenios.celexpress.org/LGX_Convenios.html'
+    };
+
     // Datos en memoria
     this.clientes = new Map();
     this.conversaciones = new Map();
@@ -63,7 +81,12 @@ class ChatBotCobranza {
       ESPERANDO_GESTOR: 'esperando_gestor',
       CONFIRMACION_PAGO: 'confirmacion_pago',
       EXCUSAS: 'excusas',
-      IDENTIFICACION: 'identificacion'
+      IDENTIFICACION: 'identificacion',
+      // v3: nuevos estados para flujo de cierre directo
+      PROPUESTA_CONVENIO: 'propuesta_convenio',     // Bot propuso A/B, espera elección
+      ESPERA_CONFIRMACION: 'espera_confirmacion',   // Bot mandó link, espera "CONFIRMO"
+      CONVENIO_ACTIVO: 'convenio_activo',           // Cliente confirmó, espera comprobante
+      PAGO_UNICO: 'pago_unico'                      // Saldo bajo, no convenio
     };
 
     this.NIVELES = {
@@ -105,6 +128,133 @@ class ChatBotCobranza {
 
   fmt(cantidad) {
     return '$' + Math.round(cantidad).toLocaleString('es-MX');
+  }
+
+  // ═══════════════════════════════════════
+  // v3: HELPERS DE CONVENIO
+  // ═══════════════════════════════════════
+
+  /**
+   * Calcula los 2 planes para un saldo dado:
+   *   Plan A: pago semanal alto (piso $1,000), menos semanas
+   *   Plan B: pago semanal bajo (piso $500), más semanas
+   * 
+   * REGLA CLAVE (2026-05): el pago semanal debe ser >= al piso del plan,
+   * pero NO se fuerza a ser exactamente el piso. Se busca el MÁXIMO de
+   * semanas posibles tal que pago ≥ piso. Ejemplo:
+   *   Saldo $9,775 ÷ 19 = $515 ✅ (válido, pago ≥ $500)
+   *   Saldo $9,775 ÷ 20 = $489 ❌ (inválido, pago < $500)
+   *   → Plan B = 19 semanas de $515
+   *
+   * Aplica 15% de recargo si el plazo supera 4 semanas.
+   * Retorna pago único si el saldo es bajo.
+   */
+  calcularPlanes(saldo) {
+    const c = this.CONVENIO;
+
+    // ¿Cabe en pago único? -> Saldo bajo
+    if (saldo <= c.umbralPagoUnico) {
+      return {
+        pagoUnico: true,
+        montoTotal: saldo,
+        fechaPago: this.proximoDiaHabil()
+      };
+    }
+
+    // Helper: calcula plan óptimo dado un pago mínimo (piso)
+    // Devuelve {semanas, monto, saldoConRecargo, conRecargo}
+    const calcularPlanOptimo = (pisoMonto) => {
+      // Primer paso: estimar semanas SIN recargo
+      const semanasSinRecargo = Math.floor(saldo / pisoMonto);
+      
+      let saldoFinal, conRecargo;
+      if (semanasSinRecargo <= c.semanasSinRecargo) {
+        // Cabe en ≤4 semanas sin recargo
+        saldoFinal = saldo;
+        conRecargo = false;
+      } else {
+        // Pasa de 4 semanas → aplica 15%
+        saldoFinal = saldo * (1 + c.recargo);
+        conRecargo = true;
+      }
+      
+      // Máximo de semanas tal que (saldoFinal / semanas) >= pisoMonto
+      // Equivale a: semanas <= saldoFinal / pisoMonto
+      const semanas = Math.floor(saldoFinal / pisoMonto);
+      
+      // Pago real = saldoFinal / semanas (redondeado hacia arriba al peso)
+      const montoReal = Math.ceil(saldoFinal / semanas);
+      
+      return {
+        monto: montoReal,
+        semanas: semanas,
+        saldoConRecargo: Math.round(saldoFinal),
+        conRecargo: conRecargo,
+        fechaInicio: this.proximoDiaHabil(),
+        fechaFin: this.fechaFinal(semanas)
+      };
+    };
+
+    return {
+      pagoUnico: false,
+      planA: calcularPlanOptimo(c.planA_monto),  // piso $1,000
+      planB: calcularPlanOptimo(c.planB_monto)   // piso $500
+    };
+  }
+
+  /**
+   * Devuelve el próximo día hábil (L-V) desde hoy.
+   * Si hoy es L-V, regresa hoy. Si es sábado/domingo, regresa lunes.
+   */
+  proximoDiaHabil(fecha = new Date()) {
+    const d = new Date(fecha);
+    const dia = d.getDay(); // 0=domingo, 6=sábado
+    if (dia === 0) d.setDate(d.getDate() + 1);      // domingo -> lunes
+    else if (dia === 6) d.setDate(d.getDate() + 2); // sábado -> lunes
+    return d;
+  }
+
+  /** Suma N semanas a la fecha inicial para obtener la fecha final del convenio. */
+  fechaFinal(semanas, desde = null) {
+    const inicio = desde || this.proximoDiaHabil();
+    const fin = new Date(inicio);
+    fin.setDate(fin.getDate() + (semanas - 1) * 7);
+    return fin;
+  }
+
+  /** Formatea fecha tipo "VIERNES 22 MAY" */
+  fmtFecha(fecha) {
+    // Aceptar string ISO o Date
+    const f = (fecha instanceof Date) ? fecha : new Date(fecha);
+    const dias = ['DOMINGO','LUNES','MARTES','MIÉRCOLES','JUEVES','VIERNES','SÁBADO'];
+    const meses = ['ENE','FEB','MAR','ABR','MAY','JUN','JUL','AGO','SEP','OCT','NOV','DIC'];
+    return `${dias[f.getDay()]} ${f.getDate()} ${meses[f.getMonth()]}`;
+  }
+
+  /** Formato corto para URL: 2026-05-22 */
+  fmtFechaISO(fecha) {
+    const f = (fecha instanceof Date) ? fecha : new Date(fecha);
+    return f.toISOString().slice(0, 10);
+  }
+
+  /**
+   * Construye URL del convenio con todos los datos prellenados.
+   * El HTML LGX_Convenios.html debe leer estos query params.
+   */
+  buildUrlConvenio(cliente, plan, datos) {
+    const params = new URLSearchParams({
+      cliente: cliente.nombre || '',
+      tel: cliente.telefono || '',
+      saldo: cliente.saldo || 0,
+      plan: plan,  // 'A' o 'B'
+      semanas: datos.semanas,
+      monto: datos.monto,
+      saldoTotal: datos.saldoConRecargo,
+      fechaInicio: this.fmtFechaISO(datos.fechaInicio),
+      fechaFin: this.fmtFechaISO(datos.fechaFin),
+      recargo: datos.conRecargo ? 1 : 0
+    });
+    return `${this.CONVENIO.urlConvenio}?${params.toString()}`;
   }
 
   async procesarMensaje(msg) {
@@ -283,7 +433,8 @@ class ChatBotCobranza {
       if (conv.estado === this.ESTADOS.IDENTIFICACION) {
         const telReal = this.identificarManual(telefono, texto);
         if (telReal) {
-          this.guardarConversacion(telReal, this.ESTADOS.MENU);
+          // v3: pasar directo a propuesta de convenio, no al menú
+          this.guardarConversacion(telReal, this.ESTADOS.PROPUESTA_CONVENIO);
           const clienteReal = this.obtenerCliente(telReal);
           const nivelReal = this.getNivelMorosidad(clienteReal.diasAtraso || 0);
           return this.msgBienvenida(clienteReal, nivelReal);
@@ -315,12 +466,21 @@ _Esto nos ayuda a evitar errores y proteger su información._`;
       return this.manejarAgresion(telefono, cliente);
     }
 
+    // v3: saludo -> ir directo a propuesta de convenio
     if (['hola', 'hi', 'menu', 'inicio', 'buenos dias', 'buenas tardes', 'buenas noches'].some(cmd => textoLimpio.includes(cmd))) {
-      this.guardarConversacion(telefono, this.ESTADOS.MENU);
+      this.guardarConversacion(telefono, this.ESTADOS.PROPUESTA_CONVENIO);
       return this.msgBienvenida(cliente, nivel);
     }
 
     switch (conv.estado) {
+      // v3: nuevos estados
+      case this.ESTADOS.PROPUESTA_CONVENIO:
+        return this.procesarPropuestaConvenio(telefono, textoLimpio, cliente, nivel);
+      case this.ESTADOS.ESPERA_CONFIRMACION:
+        return this.procesarEsperaConfirmacion(telefono, textoLimpio, cliente, nivel);
+      case this.ESTADOS.CONVENIO_ACTIVO:
+        return this.procesarConvenioActivo(telefono, textoLimpio, cliente, nivel);
+      // Estados legacy (mantener por compatibilidad)
       case this.ESTADOS.MENU:
         return this.procesarMenu(telefono, textoLimpio, cliente, nivel);
       case this.ESTADOS.OPCIONES_PAGO:
@@ -332,7 +492,8 @@ _Esto nos ayuda a evitar errores y proteger su información._`;
       case this.ESTADOS.EXCUSAS:
         return this.procesarExcusa(telefono, textoLimpio, cliente, nivel);
       default:
-        this.guardarConversacion(telefono, this.ESTADOS.MENU);
+        // v3: por defecto, propuesta de convenio (no menú)
+        this.guardarConversacion(telefono, this.ESTADOS.PROPUESTA_CONVENIO);
         return this.msgBienvenida(cliente, nivel);
     }
   }
@@ -569,6 +730,370 @@ _Cobranza Mercantil Especializada_`;
   // PROCESAMIENTO NORMAL
   // ═══════════════════════════════════════
 
+  // ═══════════════════════════════════════════════════════════════════
+  // v3: NUEVOS PROCESADORES — FLUJO DE CIERRE DIRECTO
+  // ═══════════════════════════════════════════════════════════════════
+
+  /**
+   * Cliente está en estado PROPUESTA_CONVENIO. Espera "A" o "B" para
+   * aceptar uno de los 2 planes, "3" para hablar con asesor, o pago
+   * único si el saldo es bajo.
+   */
+  procesarPropuestaConvenio(telefono, texto, cliente, nivel) {
+    const saldo = cliente.saldo ?? 0;
+    const planes = this.calcularPlanes(saldo);
+    const t = texto.toLowerCase().trim();
+
+    // CASO PAGO ÚNICO: cualquier respuesta afirmativa o "1" lo activa
+    if (planes.pagoUnico) {
+      if (/^(si|sí|s|ok|va|acepto|confirmo|1|listo)$/i.test(t) || t.includes('acepto') || t.includes('confirmo')) {
+        this.guardarConversacion(telefono, this.ESTADOS.CONVENIO_ACTIVO);
+        return this.msgPagoUnicoConfirmado(cliente, planes);
+      }
+      if (t === '3' || t.includes('asesor') || t.includes('humano')) {
+        return this.conectarGestor(telefono, cliente, 'Cliente con pago único pide asesor');
+      }
+      // Reenvía propuesta
+      return this.msgBienvenida(cliente, nivel);
+    }
+
+    // CASO CONVENIO: aceptar Plan A o Plan B
+    if (t === 'a' || t === '1' || t.includes('plan a') || t.includes('rapido') || t.includes('rápido')) {
+      return this.aceptarPlan(telefono, cliente, 'A', planes.planA);
+    }
+    if (t === 'b' || t === '2' || t.includes('plan b') || t.includes('accesible')) {
+      return this.aceptarPlan(telefono, cliente, 'B', planes.planB);
+    }
+    if (t === '3' || t.includes('asesor') || t.includes('humano') || t.includes('persona')) {
+      return this.conectarGestor(telefono, cliente, 'Solicita asesor en propuesta de convenio');
+    }
+
+    // No entendí → reenviar propuesta con aclaración
+    return `🤔 No identifiqué su respuesta.
+
+Por favor responda con la *letra* del plan:
+
+  *A* → Plan Rápido ${this.fmt(planes.planA.monto)}/sem
+  *B* → Plan Accesible ${this.fmt(planes.planB.monto)}/sem
+  *3* → Hablar con asesor`;
+  }
+
+  /**
+   * Cliente eligió plan A o B.
+   * v3.1 (2026-05): Genera PDF del convenio formal en background y lo
+   * manda al cliente. El bot responde inmediato con un mensaje breve
+   * indicando que el convenio viene en camino.
+   * El cliente debe responder "ACEPTO Y FIRMO" para sellar la firma electrónica.
+   */
+  aceptarPlan(telefono, cliente, planLetra, datos) {
+    const nombre = cliente.nombre?.split(' ')[0] || 'Cliente';
+
+    // Guardar plan elegido. El folio y hash se asignan al generar el PDF
+    // y luego se actualizan en la conversación.
+    this.guardarConversacion(telefono, this.ESTADOS.ESPERA_CONFIRMACION, {
+      planElegido: planLetra,
+      planDatos: {
+        monto: datos.monto,
+        semanas: datos.semanas,
+        saldoConRecargo: datos.saldoConRecargo,
+        fechaInicio: datos.fechaInicio,
+        fechaFin: datos.fechaFin,
+        conRecargo: datos.conRecargo
+      }
+    });
+
+    // FIRE-AND-FORGET: generar y enviar PDF sin bloquear la respuesta
+    this.enviarPDFConvenioAsync(telefono, cliente, planLetra, datos)
+      .catch(e => console.error('❌ Error en envío de PDF async:', e.message));
+
+    const tipoPlan = planLetra === 'A' ? '🅰️ PLAN RÁPIDO' : '🅱️ PLAN ACCESIBLE';
+
+    return `✅ *${tipoPlan} SELECCIONADO*
+
+Sr(a). *${nombre}*, le estoy generando su:
+
+📋 *CONVENIO DE RECONOCIMIENTO DE ADEUDO Y PLAN DE PAGOS*
+
+con sus datos personalizados:
+
+┌─────────────────────────
+│ 💵 *${this.fmt(datos.monto)}* semanales
+│ 📦 *${datos.semanas} pagos*
+│ 💰 Total: *${this.fmt(datos.saldoConRecargo)}*${datos.conRecargo ? ' (incl. 15%)' : ''}
+│ 📅 Inicia: *${this.fmtFecha(datos.fechaInicio)}*
+└─────────────────────────
+
+📎 _Su convenio en PDF llegará en unos segundos..._
+
+━━━━━━━━━━━━━━━━━━━━━
+_LeGaXi Asesores · Cobranza Mercantil_`;
+  }
+
+  /**
+   * v3.1: Genera el PDF del convenio y lo envía como adjunto.
+   * Tras enviarlo, manda un segundo mensaje pidiendo la firma electrónica
+   * mediante el texto "ACEPTO Y FIRMO".
+   * 
+   * Esta función es asíncrona y NO bloquea generarRespuesta().
+   */
+  async enviarPDFConvenioAsync(telefono, cliente, planLetra, datos) {
+    try {
+      // Lazy-load del módulo PDF para no impactar startup si no se usa
+      const { generarPDFConvenio } = require('./pdfConvenio');
+
+      console.log(`📄 Generando PDF de convenio para ${telefono}...`);
+      const { buffer, folio, hash, fechaGeneracion } = await generarPDFConvenio(cliente, planLetra, datos);
+      
+      // Persistir folio y hash en la conversación
+      const conv = this.obtenerConversacion(telefono);
+      this.guardarConversacion(telefono, conv.estado, {
+        ...conv,
+        folioConvenio: folio,
+        hashConvenio: hash,
+        fechaGeneracion: fechaGeneracion?.toISOString()
+      });
+
+      // Construir JID para Baileys
+      const jid = telefono.includes('@') ? telefono :
+        (telefono.startsWith('521') ? `${telefono}@s.whatsapp.net` :
+         telefono.startsWith('52') ? `521${telefono.slice(2)}@s.whatsapp.net` :
+         `521${telefono}@s.whatsapp.net`);
+
+      const fileName = `Convenio_${folio}.pdf`;
+      const caption = `📋 Convenio Folio: ${folio}\n📅 Generado: ${(fechaGeneracion || new Date()).toLocaleString('es-MX')}\n\n_Revise el documento con atención antes de firmar._`;
+
+      // Enviar PDF
+      const resultadoPDF = await this.whatsapp.enviarDocumento(
+        telefono,
+        buffer,
+        fileName,
+        'application/pdf',
+        caption
+      );
+
+      if (!resultadoPDF.exito) {
+        console.error(`❌ Falló envío de PDF a ${telefono}: ${resultadoPDF.error}`);
+        // Fallback: avisar al cliente que no llegó
+        await this.whatsapp.enviarMensaje(telefono,
+          `⚠️ Tuvimos un problema enviando su PDF. Un asesor le contactará en breve.\n\nFolio: ${folio}`
+        );
+        return;
+      }
+
+      this.registrarInteraccion(telefono, 'pdf_enviado', `${fileName} (${folio})`, jid);
+
+      // Pequeña pausa para que el PDF se vea primero
+      await new Promise(r => setTimeout(r, 2500));
+
+      // Segundo mensaje: pedir firma electrónica
+      const msgFirma = `⚖️ *FIRMA ELECTRÓNICA REQUERIDA*
+
+Sr(a). *${cliente.nombre?.split(' ')[0] || 'Cliente'}*, ya revisó su convenio.
+
+Para que quede *LEGALMENTE FIRMADO* conforme al *Art. 89-bis del Código de Comercio* y la *NOM-151-SCFI-2016*, responda *exactamente* con:
+
+       ✍️ *ACEPTO Y FIRMO*
+
+Su respuesta quedará registrada con:
+  ✓ Folio único: *${folio}*
+  ✓ Fecha y hora exacta
+  ✓ Hash de validación
+  ✓ Identificación por número celular
+
+📌 _Esta respuesta constituye su consentimiento expreso y tiene plena validez jurídica._`;
+
+      await this.whatsapp.enviarMensaje(telefono, msgFirma);
+      this.registrarInteraccion(telefono, 'enviado', 'Solicitud firma electrónica', jid);
+
+    } catch (error) {
+      console.error(`❌ Error generando/enviando PDF a ${telefono}:`, error.message);
+      try {
+        await this.whatsapp.enviarMensaje(telefono,
+          `⚠️ Tuvimos un problema generando su convenio. Un asesor le contactará en breve.`
+        );
+      } catch(e) {}
+    }
+  }
+
+  /**
+   * Cliente debe responder "CONFIRMO" tras firmar el convenio.
+   * Si confirma, pasamos a CONVENIO_ACTIVO y mandamos datos bancarios.
+   */
+  procesarEsperaConfirmacion(telefono, texto, cliente, nivel) {
+    const t = texto.toLowerCase().trim();
+    const conv = this.obtenerConversacion(telefono);
+    const planDatos = conv.planDatos;
+
+    if (!planDatos) {
+      // Algo se rompió, regresar a propuesta
+      this.guardarConversacion(telefono, this.ESTADOS.PROPUESTA_CONVENIO);
+      return this.msgBienvenida(cliente, nivel);
+    }
+
+    // Confirmaciones válidas (v3.1: priorizar "ACEPTO Y FIRMO")
+    const aceptoYFirmo = /acepto\s*y\s*firmo|acepto\s*firmo|firmo\s*y\s*acepto/i.test(t);
+    const aceptacionGenerica = /^(confirmo|confirmado|si confirmo|acepto|si acepto|ok|listo|firmado|firme|ya firme|ya firmé)$/i.test(t)
+        || t.includes('confirmo') || t.includes('firmé') || t.includes('firme') || t.includes('acepto');
+
+    if (aceptoYFirmo || aceptacionGenerica) {
+      this.guardarConversacion(telefono, this.ESTADOS.CONVENIO_ACTIVO, {
+        ...conv,
+        planDatos,
+        firmadoEn: new Date().toISOString(),
+        textoFirma: texto.trim()
+      });
+      return this.msgConvenioActivado(cliente, planDatos, conv);
+    }
+
+    // Cliente pide reenvío del PDF
+    if (t.includes('enviar') || t.includes('reenviar') || t.includes('no recibi') || t.includes('no llego') || t.includes('mandalo') || t.includes('manda')) {
+      // Reenvío async del PDF
+      const planLetra = conv.planElegido || 'B';
+      this.enviarPDFConvenioAsync(telefono, cliente, planLetra, planDatos)
+        .catch(e => console.error('Error reenvío PDF:', e.message));
+      return `📎 Reenviándole su convenio PDF en unos segundos...`;
+    }
+
+    // Cliente quiere cambiar de plan
+    if (t === 'a' || t === 'b' || t.includes('cambiar') || t.includes('otro plan')) {
+      this.guardarConversacion(telefono, this.ESTADOS.PROPUESTA_CONVENIO);
+      return this.msgBienvenida(cliente, nivel);
+    }
+
+    // No entendí
+    const nombre = cliente.nombre?.split(' ')[0] || 'Cliente';
+    const folio = conv.folioConvenio || '';
+    return `⏳ ${nombre}, estoy esperando su firma electrónica.
+
+Revise el PDF del convenio${folio ? ` (Folio ${folio})` : ''} y responda con:
+
+       ✍️ *ACEPTO Y FIRMO*
+
+Si no recibió el PDF, responda *enviar* para reenviárselo.
+
+_Si no firma hoy, la oferta se cancela automáticamente._`;
+  }
+
+  /**
+   * Cliente confirmó el convenio. Está esperando que mande comprobante.
+   * Si manda imagen -> ya se procesa en manejarImagen() del flujo existente.
+   * Si manda texto -> recordatorio.
+   */
+  procesarConvenioActivo(telefono, texto, cliente, nivel) {
+    const t = texto.toLowerCase().trim();
+    const conv = this.obtenerConversacion(telefono);
+    const planDatos = conv.planDatos;
+    const nombre = cliente.nombre?.split(' ')[0] || 'Cliente';
+
+    // Cliente quiere ver datos bancarios otra vez
+    if (t.includes('cuenta') || t.includes('clabe') || t.includes('banco') || t.includes('donde pago') || t.includes('dónde pago') || t.includes('datos')) {
+      return `📱 *Datos para su primer pago:*
+
+${this.getDatosBancarios(nombre)}
+
+📸 Envíe comprobante aquí cuando lo realice.`;
+    }
+
+    // Cliente reporta que ya pagó (sin comprobante todavía)
+    if (t.includes('ya pagué') || t.includes('ya pague') || t.includes('depositado') || t.includes('hecho')) {
+      return `📸 *Esperando su comprobante.*
+
+${nombre}, por favor envíe la *foto del comprobante* aquí mismo para activar definitivamente su convenio.`;
+    }
+
+    // Default: recordatorio de comprobante
+    if (planDatos) {
+      return `📋 ${nombre}, su convenio quedó registrado:
+
+  💵 ${this.fmt(planDatos.monto)} semanales
+  📅 Primer pago: *${this.fmtFecha(planDatos.fechaInicio)}*
+
+📸 *Envíe comprobante* del primer pago aquí.
+
+Sin el comprobante, el convenio no se activa.`;
+    }
+
+    return `📸 Espero su comprobante de pago, ${nombre}.`;
+  }
+
+  /**
+   * Mensaje cuando el convenio queda activo (después del ACEPTO Y FIRMO).
+   * v3.1: incluye Constancia de Aceptación con folio + hash de validación.
+   */
+  msgConvenioActivado(cliente, planDatos, conv = {}) {
+    const nombre = cliente.nombre?.split(' ')[0] || 'Cliente';
+    const folio = conv.folioConvenio || 'PENDIENTE';
+    const hash = conv.hashConvenio || 'PENDIENTE';
+    const ahora = new Date();
+    const fechaFirma = ahora.toLocaleString('es-MX', {
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit'
+    });
+
+    return `🎉 *CONVENIO FIRMADO Y REGISTRADO*
+
+━━━━━━━━━━━━━━━━━━━━━
+📋 *CONSTANCIA DE ACEPTACIÓN*
+━━━━━━━━━━━━━━━━━━━━━
+
+📋 Folio:      *${folio}*
+👤 Deudor:     ${cliente.nombre || nombre}
+📱 Tel:        ${cliente.telefono || '—'}
+📅 Firmado:    ${fechaFirma}
+🔐 Hash:       ${hash}
+
+━━━━━━━━━━━━━━━━━━━━━
+
+✅ Su convenio queda *LEGALMENTE CELEBRADO* y obliga a las partes conforme al *Código de Comercio* y la *NOM-151-SCFI-2016*.
+
+⚠️ El *incumplimiento* de cualquier pago facultará al acreedor para ejercer las acciones judiciales correspondientes *sin necesidad de previo requerimiento*.
+
+━━━━━━━━━━━━━━━━━━━━━
+💳 *DATOS PARA SU PRIMER PAGO*
+━━━━━━━━━━━━━━━━━━━━━
+
+  💵 *${this.fmt(planDatos.monto)}*
+  📅 A más tardar: *${this.fmtFecha(planDatos.fechaInicio)}*
+
+${this.getDatosBancarios(nombre)}
+
+📸 *Envíe foto del comprobante aquí* para activar definitivamente su convenio.
+
+🙏 *Gracias por su compromiso.*
+
+━━━━━━━━━━━━━━━━━━━━━
+_LeGaXi Asesores · Cobranza Mercantil_`;
+  }
+
+  /**
+   * Mensaje cuando cliente acepta pago único (saldo bajo).
+   */
+  msgPagoUnicoConfirmado(cliente, planes) {
+    const nombre = cliente.nombre?.split(' ')[0] || 'Cliente';
+    const saldo = cliente.saldo ?? 0;
+    return `✅ *PAGO ÚNICO CONFIRMADO*
+
+Sr(a). *${nombre}*, su compromiso de pago:
+
+┌─────────────────────────
+│ 💰 *${this.fmt(saldo)}*
+│ 📅 A más tardar: *${this.fmtFecha(planes.fechaPago)}*
+└─────────────────────────
+
+${this.getDatosBancarios(nombre)}
+
+📸 *Envíe foto del comprobante aquí* para cerrar su cuenta.
+
+🙏 _Confiamos en su palabra._
+
+━━━━━━━━━━━━━━━━━━━━━
+_Cobranza Mercantil Especializada_`;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // FIN BLOQUE v3
+  // ═══════════════════════════════════════════════════════════════════
+
   procesarMenu(telefono, texto, cliente, nivel) {
     switch (texto) {
       case '1':
@@ -776,42 +1301,94 @@ _Cobranza Mercantil Especializada_`
   // MENSAJES PRINCIPALES
   // ═══════════════════════════════════════
 
+  // ═══════════════════════════════════════
+  // v3: BIENVENIDA DIRECTA A CONVENIO
+  // ═══════════════════════════════════════
   msgBienvenida(cliente, nivel) {
     const nombre = cliente.nombre?.split(' ')[0] || 'Cliente';
     const saldo = cliente.saldo ?? 0;
     const dias = cliente.diasAtraso || 0;
+    const planes = this.calcularPlanes(saldo);
 
-    let header, info;
-
+    // Header según nivel de morosidad
+    let header;
     switch (nivel) {
       case 'CRITICO':
-        header = `🚨 *ALERTA — COBRANZA JUDICIAL*`;
-        info = `\n⚠️ *${dias} días de atraso*\n💰 Deuda: *${this.fmt(saldo)}*\n⚖️ Su caso está por turnarse al área legal.\n`;
+        header = `🚨 *COBRANZA JUDICIAL EN PROCESO*`;
         break;
       case 'GRAVE':
-        header = `⚠️ *AVISO URGENTE*`;
-        info = `\n📅 *${dias} días de atraso*\n💰 Deuda: *${this.fmt(saldo)}*\n❌ Su historial crediticio está siendo afectado.\n`;
+        header = `⚠️ *AVISO URGENTE — ÚLTIMA OPORTUNIDAD*`;
         break;
       case 'MODERADO':
-        header = `📋 *RECORDATORIO DE PAGO*`;
-        info = `\n📅 Atraso: ${dias} días\n💰 Saldo: ${this.fmt(saldo)}\n`;
+        header = `📋 *RECORDATORIO DE PAGO PENDIENTE*`;
         break;
       default:
-        header = `📞 *LeGaXi Asesores*`;
-        info = saldo > 0 ? `\n💰 Saldo pendiente: ${this.fmt(saldo)}\n` : '';
+        header = `📞 *LeGaXi Asesores — Cobranza*`;
     }
+
+    // CASO 1: Saldo bajo -> pago único directo
+    if (planes.pagoUnico) {
+      return `${header}
+
+Sr(a). *${nombre}* 👋
+
+┌─────────────────────────
+│ 💰 Saldo: *${this.fmt(saldo)}*
+│ 📅 Atraso: *${dias} días*
+└─────────────────────────
+
+Para regularizar su cuenta, *liquide HOY*:
+
+  💵 *${this.fmt(saldo)}* en pago único
+  📅 A más tardar: *${this.fmtFecha(planes.fechaPago)}*
+
+${this.getDatosBancarios(cliente.telefono || nombre)}
+
+📸 *Envíe foto del comprobante aquí.*
+
+⚠️ De no pagar, su cuenta escala a cobranza legal.
+
+━━━━━━━━━━━━━━━━━━━━━
+_Cobranza Mercantil Especializada_`;
+    }
+
+    // CASO 2: Convenio en 2 planes (A=$1000/sem, B=$500/sem)
+    const a = planes.planA;
+    const b = planes.planB;
+
+    const accion = nivel === 'CRITICO'
+      ? 'Para detener el proceso legal, le ofrezco DOS opciones de convenio:'
+      : 'Le ofrezco DOS opciones de convenio para regularizar su cuenta:';
 
     return `${header}
 
-Hola *${nombre}* 👋${info}
-Seleccione una opción:
+Sr(a). *${nombre}* 👋
 
-1️⃣  💳  *Pagar* mi adeudo
-2️⃣  📋  *Convenio* de pagos
-3️⃣  🔍  *Consultar* mi saldo
-4️⃣  👤  *Hablar* con asesor
+┌─────────────────────────
+│ 💰 Saldo: *${this.fmt(saldo)}*
+│ 📅 Atraso: *${dias} días*
+└─────────────────────────
 
-_Responda con el número_
+${accion}
+
+━━━━━━━━━━━━━━━━━━━━━
+🅰️  *PLAN RÁPIDO*
+    💵 *${this.fmt(a.monto)}* semanales
+    📦 *${a.semanas} pagos*${a.conRecargo ? ' (incluye 15%)' : ''}
+━━━━━━━━━━━━━━━━━━━━━
+🅱️  *PLAN ACCESIBLE*
+    💵 *${this.fmt(b.monto)}* semanales
+    📦 *${b.semanas} pagos*${b.conRecargo ? ' (incluye 15%)' : ''}
+━━━━━━━━━━━━━━━━━━━━━
+
+📅 *Primer pago:* ${this.fmtFecha(a.fechaInicio)}
+
+Responda:
+  *A* → Acepto Plan Rápido
+  *B* → Acepto Plan Accesible
+  *3* → Hablar con un asesor
+
+⏰ _Esta oferta vence en 24 hrs._
 
 ━━━━━━━━━━━━━━━━━━━━━
 _Cobranza Mercantil Especializada_`;
