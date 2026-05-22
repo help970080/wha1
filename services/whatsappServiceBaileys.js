@@ -421,7 +421,13 @@ class WhatsAppService {
   }
 
   /**
-   * v3 (2026-05): Envía un documento (PDF) por WhatsApp.
+   * v3.2 (2026-05): Envía un documento (PDF) por WhatsApp.
+   * 
+   * ESTRATEGIA: escribe el PDF a /tmp y lo manda con { document: { url: path } }.
+   * Esta es la forma DOCUMENTADA y CONFIABLE en Baileys. Pasar Buffer directo
+   * funciona a veces pero falla silenciosamente en otras (lo que pasaba con
+   * Adriana - el cliente recibía el texto pero no el PDF).
+   * 
    * @param {String} telefono - 10 dígitos
    * @param {Buffer} buffer - contenido del archivo
    * @param {String} fileName - nombre del archivo (ej. 'Convenio_LGX-B-001.pdf')
@@ -432,13 +438,15 @@ class WhatsAppService {
     if (!this.isConnected()) {
       return { exito: false, error: 'WhatsApp no conectado' };
     }
+    
+    let tmpPath = null;
+    
     try {
       // Validar buffer
       if (!buffer || buffer.length === 0) {
         console.error(`❌ enviarDocumento: buffer vacío para ${telefono}`);
         return { exito: false, error: 'Buffer vacío' };
       }
-      // Asegurar que sea un Buffer real
       if (!Buffer.isBuffer(buffer)) {
         console.log(`⚠️  Convirtiendo a Buffer real (era ${typeof buffer})`);
         buffer = Buffer.from(buffer);
@@ -451,15 +459,25 @@ class WhatsAppService {
         return { exito: false, error: 'Numero no esta en WhatsApp', telefono };
       }
 
+      // ─── Escribir a disco temporal ───
+      // Baileys es más estable cuando lee de URL/path que cuando se le pasa Buffer crudo.
+      // Esto fue el bug: el cliente recibía el texto pero el PDF no llegaba.
+      const tmpDir = '/tmp';
+      // Sanitizar nombre de archivo y agregar timestamp para evitar colisiones
+      const fileNameSafe = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+      tmpPath = path.join(tmpDir, `${Date.now()}_${fileNameSafe}`);
+      fs.writeFileSync(tmpPath, buffer);
+      console.log(`💾 PDF temporal escrito: ${tmpPath} (${buffer.length} bytes)`);
+
       // Secuencia humana corta
       try { await this.sock.sendPresenceUpdate('available'); } catch(e) {}
       await new Promise(r => setTimeout(r, 500 + Math.random() * 800));
 
-      console.log(`📎 Enviando documento a ${jid}: ${fileName} (${buffer.length} bytes)`);
+      console.log(`📎 Enviando documento a ${jid}: ${fileName}`);
 
-      // Construir mensaje sin pasar caption si está vacío
+      // Construir payload usando { url: path } - método documentado y robusto
       const msgPayload = {
-        document: buffer,
+        document: { url: tmpPath },
         mimetype: mimetype,
         fileName: fileName
       };
@@ -485,6 +503,13 @@ class WhatsAppService {
       console.error(`❌ Error enviando documento a ${telefono}:`, error.message);
       console.error('   Stack:', error.stack?.split('\n').slice(0, 3).join('\n'));
       return { exito: false, error: error.message, telefono };
+    } finally {
+      // Limpiar archivo temporal después de 30s (dar tiempo a que Baileys termine de subir)
+      if (tmpPath) {
+        setTimeout(() => {
+          try { fs.unlinkSync(tmpPath); } catch(e) {}
+        }, 30000);
+      }
     }
   }
 
