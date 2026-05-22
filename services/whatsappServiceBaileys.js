@@ -420,6 +420,55 @@ class WhatsAppService {
     }
   }
 
+  /**
+   * v3 (2026-05): Envía un documento (PDF) por WhatsApp.
+   * @param {String} telefono - 10 dígitos
+   * @param {Buffer} buffer - contenido del archivo
+   * @param {String} fileName - nombre del archivo (ej. 'Convenio_LGX-B-001.pdf')
+   * @param {String} mimetype - default 'application/pdf'
+   * @param {String} caption - texto opcional bajo el documento
+   */
+  async enviarDocumento(telefono, buffer, fileName, mimetype = 'application/pdf', caption = '') {
+    if (!this.isConnected()) {
+      return { exito: false, error: 'WhatsApp no conectado' };
+    }
+    try {
+      const jid = this.formatearNumero(telefono);
+      const numeroSinAt = jid.split('@')[0];
+      const existe = await this.numeroExisteEnWA(numeroSinAt);
+      if (!existe) {
+        return { exito: false, error: 'Numero no esta en WhatsApp', telefono };
+      }
+
+      // Secuencia humana corta
+      try { await this.sock.sendPresenceUpdate('available'); } catch(e) {}
+      await new Promise(r => setTimeout(r, 500 + Math.random() * 800));
+
+      const sentMsg = await this.sock.sendMessage(jid, {
+        document: buffer,
+        mimetype,
+        fileName,
+        caption: caption || undefined
+      });
+
+      // LID mapping (igual que enviarMensaje)
+      let tel10 = String(telefono).replace(/\D/g, '');
+      if (tel10.startsWith('521') && tel10.length === 13) tel10 = tel10.slice(3);
+      else if (tel10.startsWith('52') && tel10.length === 12) tel10 = tel10.slice(2);
+      if (sentMsg?.key?.remoteJid) {
+        const lid = sentMsg.key.remoteJid.split('@')[0];
+        this.lidMap.set(lid, tel10);
+      }
+      this.ultimoEnvio = { tel10, timestamp: Date.now() };
+
+      console.log(`📄 Documento enviado a ${telefono}: ${fileName}`);
+      return { exito: true, telefono, fileName };
+    } catch (error) {
+      console.error(`❌ Error enviando documento a ${telefono}:`, error.message);
+      return { exito: false, error: error.message, telefono };
+    }
+  }
+
   async cerrarSesion() {
     try {
       if (this.sock) {
