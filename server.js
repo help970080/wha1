@@ -681,7 +681,7 @@ app.post('/api/enviar-individual', async (req, res) => {
     }
     
     // 2. Validar parametros
-    const { telefono, mensaje } = req.body;
+    const { telefono, mensaje, cliente } = req.body;
     
     if (!telefono || !mensaje) {
       return res.status(400).json({ 
@@ -696,6 +696,29 @@ app.post('/api/enviar-individual', async (req, res) => {
         success: false, 
         error: 'WhatsApp no conectado. Escanea el QR primero.' 
       });
+    }
+    
+    // 3.5 v3.1: Si Fantasma manda datos del cliente, los registramos
+    //          en el chatbot ANTES de enviar el mensaje. Así cuando el
+    //          cliente conteste, el bot ya lo reconoce y puede proponer
+    //          convenio directo sin pedir identificación.
+    //
+    //          Si no manda datos pero el teléfono tiene nombre/saldo en
+    //          el cuerpo del mensaje no podemos extraerlos: Fantasma DEBE
+    //          incluir cliente:{nombre, saldo, diasAtraso} en el POST.
+    if (cliente && typeof cliente === 'object') {
+      try {
+        chatbot.registrarCliente({
+          telefono: telefono,
+          nombre: cliente.nombre,
+          saldo: cliente.saldo,
+          diasAtraso: cliente.diasAtraso
+        });
+      } catch(e) {
+        console.warn('[API] No se pudo registrar cliente en chatbot:', e.message);
+      }
+    } else {
+      console.log(`[API] ⚠️ Envío sin datos de cliente para ${telefono}. Bot no podrá reconocerlo cuando responda.`);
     }
     
     // 4. Enviar mensaje usando el servicio existente
