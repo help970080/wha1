@@ -62,7 +62,19 @@ setInterval(() => {
     chatbotIniciado = true;
     
     // Registrar handler de mensajes ENTRANTES (respuestas de clientes)
+    // IMPORTANTE: este onMessage SOBRESCRIBE el del chatbot. Por eso aqui
+    // adentro tenemos que: 1) procesar el mensaje con el chatbot para que
+    // genere respuesta automatica, 2) notificar a Fantasma para el panel.
     whatsappService.onMessage(async (msg) => {
+      // === FIX 2026-05: disparar respuesta automatica del chatbot ===
+      // (procesarMensaje envia la respuesta por WhatsApp). Si falla, no
+      // queremos que se interrumpa el registro en Fantasma.
+      try {
+        await chatbot.procesarMensaje(msg);
+      } catch(e) {
+        console.error('❌ Error en chatbot.procesarMensaje:', e.message);
+      }
+      
       try {
         const remoteJid = msg.key.remoteJid;
         let telefono = remoteJid.split('@')[0];
