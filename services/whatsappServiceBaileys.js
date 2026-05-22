@@ -433,6 +433,17 @@ class WhatsAppService {
       return { exito: false, error: 'WhatsApp no conectado' };
     }
     try {
+      // Validar buffer
+      if (!buffer || buffer.length === 0) {
+        console.error(`❌ enviarDocumento: buffer vacío para ${telefono}`);
+        return { exito: false, error: 'Buffer vacío' };
+      }
+      // Asegurar que sea un Buffer real
+      if (!Buffer.isBuffer(buffer)) {
+        console.log(`⚠️  Convirtiendo a Buffer real (era ${typeof buffer})`);
+        buffer = Buffer.from(buffer);
+      }
+      
       const jid = this.formatearNumero(telefono);
       const numeroSinAt = jid.split('@')[0];
       const existe = await this.numeroExisteEnWA(numeroSinAt);
@@ -444,12 +455,19 @@ class WhatsAppService {
       try { await this.sock.sendPresenceUpdate('available'); } catch(e) {}
       await new Promise(r => setTimeout(r, 500 + Math.random() * 800));
 
-      const sentMsg = await this.sock.sendMessage(jid, {
+      console.log(`📎 Enviando documento a ${jid}: ${fileName} (${buffer.length} bytes)`);
+
+      // Construir mensaje sin pasar caption si está vacío
+      const msgPayload = {
         document: buffer,
-        mimetype,
-        fileName,
-        caption: caption || undefined
-      });
+        mimetype: mimetype,
+        fileName: fileName
+      };
+      if (caption && caption.trim()) {
+        msgPayload.caption = caption;
+      }
+
+      const sentMsg = await this.sock.sendMessage(jid, msgPayload);
 
       // LID mapping (igual que enviarMensaje)
       let tel10 = String(telefono).replace(/\D/g, '');
@@ -461,10 +479,11 @@ class WhatsAppService {
       }
       this.ultimoEnvio = { tel10, timestamp: Date.now() };
 
-      console.log(`📄 Documento enviado a ${telefono}: ${fileName}`);
-      return { exito: true, telefono, fileName };
+      console.log(`✅ Documento enviado a ${telefono}: ${fileName} (msgId: ${sentMsg?.key?.id || 'n/a'})`);
+      return { exito: true, telefono, fileName, msgId: sentMsg?.key?.id };
     } catch (error) {
       console.error(`❌ Error enviando documento a ${telefono}:`, error.message);
+      console.error('   Stack:', error.stack?.split('\n').slice(0, 3).join('\n'));
       return { exito: false, error: error.message, telefono };
     }
   }
