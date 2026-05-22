@@ -534,6 +534,37 @@ _Esto nos ayuda a evitar errores y proteger su información._`;
     return agresiones.some(a => texto.includes(a));
   }
 
+  /**
+   * v3.1: detecta despedidas y agradecimientos para cerrar conversación
+   * sin volver a ofrecer convenio (evita el ciclo).
+   * Solo detecta cuando el mensaje es CORTO y se parece a una despedida —
+   * "muchas gracias por todo me comunico mañana" cuenta, pero "gracias y
+   * cuándo es el siguiente pago" NO porque tiene una pregunta.
+   */
+  esDespedida(texto) {
+    const t = texto.toLowerCase().trim();
+    // Limitar a mensajes cortos (< 60 chars) para no confundir con preguntas
+    if (t.length > 60) return false;
+    // Si el mensaje contiene signo de pregunta o palabras de duda, no es despedida
+    if (/[?¿]|cuando|cuánto|cómo|donde|dónde|porque|por que|qué hago|que hago/i.test(t)) return false;
+    
+    const despedidas = [
+      'gracias', 'muchas gracias', 'mil gracias', 'ok gracias',
+      'okay gracias', 'va gracias', 'bien gracias',
+      'hasta luego', 'hasta pronto', 'nos vemos', 'bye',
+      'adios', 'adiós', 'hasta mañana', 'que tenga buen dia',
+      'que tenga buena tarde', 'que tenga buena noche',
+      'buen día', 'buena tarde', 'buena noche',
+      'me comunico', 'le aviso', 'te aviso', 'aviso', 'cualquier cosa aviso',
+      'le marco', 'te marco', 'te llamo', 'le llamo',
+      'esta bien', 'está bien', 'entendido', 'comprendido',
+      'ok', 'okay', 'okey', 'oki', 'vale', 'va', 'sale', 'listo',
+      'perfecto', 'excelente', 'genial'
+    ];
+    // Match exacto o casi exacto (toda la cadena ES la despedida)
+    return despedidas.some(d => t === d || t === d + '.' || t === d + '!');
+  }
+
   // ═══════════════════════════════════════
   // DATOS BANCARIOS
   // ═══════════════════════════════════════
@@ -860,7 +891,9 @@ _LeGaXi Asesores · Cobranza Mercantil_`;
          `521${telefono}@s.whatsapp.net`);
 
       const fileName = `Convenio_${folio}.pdf`;
-      const caption = `📋 Convenio Folio: ${folio}\n📅 Generado: ${(fechaGeneracion || new Date()).toLocaleString('es-MX')}\n\n_Revise el documento con atención antes de firmar._`;
+      // Caption simple, sin formato markdown (WhatsApp puede rechazar caption
+      // largo o con asteriscos en documentos en algunas versiones).
+      const caption = `Convenio Folio: ${folio}`;
 
       // Enviar PDF
       const resultadoPDF = await this.whatsapp.enviarDocumento(
@@ -923,6 +956,8 @@ Su respuesta quedará registrada con:
     const t = texto.toLowerCase().trim();
     const conv = this.obtenerConversacion(telefono);
     const planDatos = conv.planDatos;
+    const nombre = cliente.nombre?.split(' ')[0] || 'Cliente';
+    const folio = conv.folioConvenio || '';
 
     if (!planDatos) {
       // Algo se rompió, regresar a propuesta
@@ -930,12 +965,13 @@ Su respuesta quedará registrada con:
       return this.msgBienvenida(cliente, nivel);
     }
 
-    // Confirmaciones válidas (v3.1: priorizar "ACEPTO Y FIRMO")
+    // v3.1: Aceptación válida = palabras claras de firma/aceptación.
+    // YA NO aceptamos "ok" solo, porque podría ser despedida y causaba ciclos.
     const aceptoYFirmo = /acepto\s*y\s*firmo|acepto\s*firmo|firmo\s*y\s*acepto/i.test(t);
-    const aceptacionGenerica = /^(confirmo|confirmado|si confirmo|acepto|si acepto|ok|listo|firmado|firme|ya firme|ya firmé)$/i.test(t)
-        || t.includes('confirmo') || t.includes('firmé') || t.includes('firme') || t.includes('acepto');
+    const aceptacionFuerte = /^(confirmo|confirmado|si confirmo|acepto|si acepto|firmado|firme|ya firme|ya firmé|si acepto y firmo)$/i.test(t)
+        || t.includes('confirmo') || t.includes('firmé') || (t.includes('firme') && t.length < 30) || (t.includes('acepto') && t.length < 30);
 
-    if (aceptoYFirmo || aceptacionGenerica) {
+    if (aceptoYFirmo || aceptacionFuerte) {
       this.guardarConversacion(telefono, this.ESTADOS.CONVENIO_ACTIVO, {
         ...conv,
         planDatos,
@@ -943,6 +979,18 @@ Su respuesta quedará registrada con:
         textoFirma: texto.trim()
       });
       return this.msgConvenioActivado(cliente, planDatos, conv);
+    }
+
+    // v3.1: Si dice despedida/agradecimiento ANTES de firmar, recordarle firma
+    // sin reciclar el flujo (no volver a mandar el PDF).
+    if (this.esDespedida(t)) {
+      return `⏳ ${nombre}, antes de despedirnos necesito su firma.
+
+Por favor revise el PDF que le envié${folio ? ` (Folio ${folio})` : ''} y responda:
+
+       ✍️ *ACEPTO Y FIRMO*
+
+Sin la firma, el convenio no queda registrado.`;
     }
 
     // Cliente pide reenvío del PDF
@@ -961,8 +1009,6 @@ Su respuesta quedará registrada con:
     }
 
     // No entendí
-    const nombre = cliente.nombre?.split(' ')[0] || 'Cliente';
-    const folio = conv.folioConvenio || '';
     return `⏳ ${nombre}, estoy esperando su firma electrónica.
 
 Revise el PDF del convenio${folio ? ` (Folio ${folio})` : ''} y responda con:
@@ -984,6 +1030,50 @@ _Si no firma hoy, la oferta se cancela automáticamente._`;
     const conv = this.obtenerConversacion(telefono);
     const planDatos = conv.planDatos;
     const nombre = cliente.nombre?.split(' ')[0] || 'Cliente';
+    const folio = conv.folioConvenio || '';
+
+    // v3.1: PRIMERO revisar si la conversación ya fue cerrada por despedida.
+    // Si es así, solo respondemos a: (a) "hola" para reabrir, (b) preguntas
+    // explícitas, o (c) palabras clave de cuenta/pago. Todo lo demás → null.
+    if (conv.conversacionCerrada) {
+      // Reabrir con saludo
+      if (/^(hola|hi|buenas|buenos dias|buen dia|que tal)/i.test(t)) {
+        this.guardarConversacion(telefono, this.ESTADOS.CONVENIO_ACTIVO, {
+          ...conv, conversacionCerrada: false
+        });
+        return `👋 ${nombre}, su convenio sigue activo.
+
+${planDatos ? `Su próximo paso es enviar el comprobante del primer pago de *${this.fmt(planDatos.monto)}* programado para *${this.fmtFecha(planDatos.fechaInicio)}*.` : ''}
+
+📸 Envíe foto del comprobante aquí.`;
+      }
+      // Pregunta o palabra clave relevante → reabrir y responder
+      if (/[?¿]|cuando|cuánto|cómo|donde|dónde|cuenta|banco|clabe|datos|comprobante|pagué|pague|deposit|transfer/i.test(t)) {
+        this.guardarConversacion(telefono, this.ESTADOS.CONVENIO_ACTIVO, {
+          ...conv, conversacionCerrada: false
+        });
+        // continúa con la lógica normal abajo
+      } else {
+        // Mensaje irrelevante después de despedida → no responder (evita ciclo)
+        return null;
+      }
+    }
+
+    // v3.1: Si es despedida/agradecimiento, despedirse y cerrar.
+    if (this.esDespedida(t)) {
+      this.guardarConversacion(telefono, this.ESTADOS.CONVENIO_ACTIVO, {
+        ...conv,
+        conversacionCerrada: true,
+        despedidaEn: new Date().toISOString()
+      });
+      return `🙏 Gracias a usted, *${nombre}*.
+
+Le esperamos con su primer pago el *${this.fmtFecha(planDatos?.fechaInicio || new Date())}*.${folio ? `\n\n📋 Folio: *${folio}*` : ''}
+
+Que tenga excelente día.
+
+_LeGaXi Asesores_`;
+    }
 
     // Cliente quiere ver datos bancarios otra vez
     if (t.includes('cuenta') || t.includes('clabe') || t.includes('banco') || t.includes('donde pago') || t.includes('dónde pago') || t.includes('datos')) {
@@ -1606,7 +1696,10 @@ ${urgente ? '⏰ *Su caso es urgente, no demore.*' : 'O escriba *HOLA* para rein
   }
 
   guardarConversacion(telefono, estado, datos = {}) {
-    this.conversaciones.set(telefono, { estado, ...datos, timestamp: Date.now() });
+    // FIX 2026-05 v3.1: si datos contiene 'estado', NO debe sobrescribir el
+    // parámetro estado. Eliminamos cualquier estado del payload antes del spread.
+    const { estado: _ignorar, ...resto } = datos;
+    this.conversaciones.set(telefono, { ...resto, estado, timestamp: Date.now() });
   }
 
   registrarInteraccion(telefono, tipo, detalle, jidOriginal = null) {
@@ -1650,6 +1743,36 @@ ${urgente ? '⏰ *Su caso es urgente, no demore.*' : 'O escriba *HOLA* para rein
     this._premapearLids();
 
     return this.clientes.size;
+  }
+
+  /**
+   * v3.1: Registra (o actualiza) UN SOLO cliente sin afectar la cartera
+   * existente. Pensado para envíos individuales desde Fantasma o flujos
+   * uno-a-uno donde no se carga lista completa.
+   */
+  registrarCliente(datosCliente) {
+    if (!datosCliente) return null;
+    const c = datosCliente;
+    const tel = (c.telefono || c.Telefono || c.Teléfono || c.TELEFONO || '').toString().replace(/\D/g, '').slice(-10);
+    if (!tel) {
+      console.warn('⚠️ registrarCliente: teléfono inválido', datosCliente);
+      return null;
+    }
+
+    const saldoRaw = c.saldo ?? c.Saldo ?? c.SALDO ?? 0;
+    const diasRaw  = c.diasAtraso ?? c.DiasAtraso ?? c.DIASATRASO ?? c['Días Atraso'] ?? c['dias_atraso'] ?? 0;
+
+    const ya = this.clientes.get(tel);
+    const cliente = {
+      telefono: tel,
+      nombre: c.nombre || c.Nombre || c.NOMBRE || c.Cliente || c.cliente || ya?.nombre || 'Cliente',
+      saldo: parseFloat(saldoRaw) || ya?.saldo || 0,
+      diasAtraso: parseInt(diasRaw) || ya?.diasAtraso || 0,
+    };
+
+    this.clientes.set(tel, cliente);
+    console.log(`👤 Cliente ${ya ? 'actualizado' : 'registrado'}: ${cliente.nombre} | tel:${tel} | saldo:${cliente.saldo} | dias:${cliente.diasAtraso}`);
+    return cliente;
   }
 
   async _premapearLids() {
