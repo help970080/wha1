@@ -72,6 +72,34 @@ class ChatBotCobranza {
     this.lidMap = new Map(); // LID → teléfono real
     this.interacciones = [];
 
+    // Auto-persistir lidMap: cada vez que se agrega/cambia un mapeo,
+    // se guarda a disco. Sobrevive a redeploys de Render.
+    const _setOriginal = this.lidMap.set.bind(this.lidMap);
+    const _deleteOriginal = this.lidMap.delete.bind(this.lidMap);
+    const _clearOriginal = this.lidMap.clear.bind(this.lidMap);
+    const self = this;
+    this.lidMap.set = function(key, val) {
+      const ret = _setOriginal(key, val);
+      // Throttle: no guardar más de una vez por segundo (premapeo masivo)
+      if (!self._lidSaveTimer) {
+        self._lidSaveTimer = setTimeout(() => {
+          self.guardarLidMap();
+          self._lidSaveTimer = null;
+        }, 1000);
+      }
+      return ret;
+    };
+    this.lidMap.delete = function(key) {
+      const ret = _deleteOriginal(key);
+      self.guardarLidMap();
+      return ret;
+    };
+    this.lidMap.clear = function() {
+      const ret = _clearOriginal();
+      self.guardarLidMap();
+      return ret;
+    };
+
     // Estados
     this.ESTADOS = {
       INICIAL: 'inicial',
@@ -1714,9 +1742,11 @@ ${urgente ? '⏰ *Su caso es urgente, no demore.*' : 'O escriba *HOLA* para rein
   cargarCartera(clientes, reemplazar = true) {
     if (reemplazar) {
       this.clientes.clear();
-      this.lidMap.clear();
+      // NO limpiar lidMap aqui: lidMap (LID->tel) sigue siendo valido
+      // aunque la cartera cambie, mientras los telefonos sigan siendo los mismos.
+      // Si necesitas resetearlo manualmente, usa resetLidMap().
       this.conversaciones.clear();
-      console.log('🧹 Cache limpiada antes de cargar nueva cartera');
+      console.log('🧹 Cache de clientes y conversaciones limpiada (lidMap preservado)');
     }
 
     clientes.forEach(c => {
@@ -1810,12 +1840,31 @@ ${urgente ? '⏰ *Su caso es urgente, no demore.*' : 'O escriba *HOLA* para rein
           }
         });
       }
-    } catch (e) {}
+      // Cargar lidMap persistido (sobrevive a redeploys)
+      if (fs.existsSync('chatbot_lidmap.json')) {
+        const lids = JSON.parse(fs.readFileSync('chatbot_lidmap.json', 'utf8'));
+        Object.entries(lids).forEach(([lid, tel]) => {
+          this.lidMap.set(lid, tel);
+        });
+        console.log(`📂 LidMap cargado: ${this.lidMap.size} entradas`);
+      }
+    } catch (e) {
+      console.error('Error cargarDatos:', e.message);
+    }
   }
 
   guardarDatos() {
     try {
       fs.writeFileSync('chatbot_clientes.json', JSON.stringify([...this.clientes.values()], null, 2));
+    } catch (e) {}
+  }
+
+  // Guarda el lidMap a disco (lo hacemos en cada cambio importante)
+  guardarLidMap() {
+    try {
+      const obj = {};
+      this.lidMap.forEach((tel, lid) => { obj[lid] = tel; });
+      fs.writeFileSync('chatbot_lidmap.json', JSON.stringify(obj, null, 2));
     } catch (e) {}
   }
 
