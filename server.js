@@ -1,1623 +1,1505 @@
-/**
- * ═══════════════════════════════════════════════════════════
- * CELEXPRESS - WHATSAPP MASIVO + CHATBOT
- * LMV CREDIA SA DE CV
- * ═══════════════════════════════════════════════════════════
- * 
- * Sistema completo de cobranza por WhatsApp:
- * - Envío masivo controlado (anti-baneo)
- * - ChatBot automático de respuestas
- * - Notificación a gestores
- * - Panel de control web
- * - API REST completa
- * 
- * Gestores:
- * - Lic. Carlos: 7352588215
- * - Lic. Gustavo: 5548039744
- */
-
 require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
-const multer = require('multer');
-const XLSX = require('xlsx');
-const path = require('path');
+// ═══════════════════════════════════════════════════════════════
+// LeGaXi Voice Bot v10.0 - Agente conversacional con Claude
+// ═══════════════════════════════════════════════════════════════
+// NUEVO v10.0:
+//   - Loop conversacional (máx 6 turnos)
+//   - Claude Haiku 4.5 como cerebro (tool use)
+//   - Tono cercano y empático (Tono B)
+//   - Function calling: registrar_promesa, marcar_equivocado,
+//     marcar_no_esta, marcar_rechazo, terminar_llamada
+//   - Frase puente cacheada mientras Claude piensa
+//   - Cola de concurrencia para edge-tts (máx 3 simultáneos)
+//   - Promesas van directo a GAS addPromesa
+//   - Compatible 100% con /api/llamar-bot existente
+// ═══════════════════════════════════════════════════════════════
+
+const net = require('net');
+const http = require('http');
 const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const { spawn, exec } = require('child_process');
+const vosk = require('vosk-koffi');
+const Anthropic = require('@anthropic-ai/sdk');
 
-const WhatsAppService = require('./services/whatsappServiceBaileys');
-const EnvioMasivoService = require('./services/envioMasivoService');
-const ChatBotCobranza = require('./services/chatbotCobranza');
+const AUDIOSOCKET_PORT = 8090;
+const HTTP_API_PORT = 3002;
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+// v10.8: Límite duro de llamadas conversacionales simultáneas.
+// Cada llamada usa ~150MB RAM por Vosk + slot edge-tts + CPU para audio.
+// Default 3 = conservador (cabe en WSL2 estándar). Subir solo si se ha probado.
+const MAX_CONCURRENTES = parseInt(process.env.MAX_CONCURRENTES) || 3;
 
-// Multer para archivos (Excel + imágenes)
-const upload = multer({ 
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 } // 10MB
+// Contador global de llamadas activas en este momento
+let llamadasActivas = 0;
+function getLlamadasActivas() { return llamadasActivas; }
+function incLlamadas() { llamadasActivas++; }
+function decLlamadas() { if (llamadasActivas > 0) llamadasActivas--; }
+
+const CACHE_DIR = path.join(__dirname, 'cache');
+const RESPUESTAS_DIR = path.join(CACHE_DIR, 'respuestas_v10');
+const SALUDOS_DIR = path.join(CACHE_DIR, 'saludos_v10');
+const PUENTES_DIR = path.join(CACHE_DIR, 'puentes_v10');
+const RECORDINGS_DIR = path.join(__dirname, 'recordings');
+const MODEL_PATH = path.join(__dirname, 'models/es-small');
+const SAMPLE_RATE = 8000;
+const FRAME_SIZE = 320;
+
+const TTS_VOICE = 'es-MX-JorgeNeural';
+const TTS_RATE = '-5%';
+
+const SILENCE_THRESHOLD = 250;
+const SILENCE_MS = 400;        // v10.5: 500→400ms (más rápido detectar fin de habla)
+const MIN_SPEECH_MS = 250;     // v10.5: 300→250ms (capta "sí" más cortos)
+const STALL_MS = 900;          // v10.5: 1500→900ms (corta antes el silencio)
+const MAX_LISTEN_MS = 6000;    // v10.5: 12000→6000ms (no esperar 12s al cliente)
+const MAX_TURNOS = 6;
+const TIEMPO_MAX_LLAMADA_MS = 180000;  // 3 min duro
+
+const FANTASMA_URL = process.env.FANTASMA_URL || 'https://phantom.legaxia.uk';
+const IVR_API_TOKEN = process.env.IVR_API_TOKEN || '';
+const API_TOKEN_LOCAL = process.env.BOT_API_TOKEN || 'legaxi_bot_2026';
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
+// const GAS_PROMESAS_URL eliminado v10 final: las promesas van a Fantasma/Postgres,
+// porque Google bloquea POSTs anónimos a Apps Script desde curl/Node.
+
+const DESPACHO_DEFAULT = 'Legaxi Asociados';
+const RETORNO_DEFAULT = '55 44 62 11 00';
+const ACREEDOR_DEFAULT = 'Credia';
+
+const KIND_HANGUP = 0x00;
+const KIND_UUID = 0x01;
+const KIND_AUDIO = 0x10;
+
+[CACHE_DIR, RESPUESTAS_DIR, SALUDOS_DIR, PUENTES_DIR, RECORDINGS_DIR].forEach(d => {
+    if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
 });
 
-app.use(cors());
-app.use(express.json({ limit: '50mb' }));
+vosk.setLogLevel(-1);
+console.log('Cargando modelo Vosk...');
+const voskModel = new vosk.Model(MODEL_PATH);
+console.log('Modelo Vosk OK');
 
-// ═══════════════════════════════════════════════════════════
-// SERVICIOS
-// ═══════════════════════════════════════════════════════════
+if (!ANTHROPIC_API_KEY) {
+    console.error('⚠⚠⚠ FALTA ANTHROPIC_API_KEY en .env - el bot NO funcionará');
+} else {
+    console.log('Claude API key cargada ✓');
+}
+const claude = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+console.log('');
 
-const whatsappService = new WhatsAppService();
-const chatbot = new ChatBotCobranza(whatsappService);
-const envioMasivoService = new EnvioMasivoService(whatsappService, chatbot);
+// ═══ Cola de concurrencia para edge-tts ═══
+let ttsEnVuelo = 0;
+const TTS_MAX_CONCURRENT = 3;
+const ttsCola = [];
 
-let chatbotIniciado = false;
-
-// Auto-iniciar WhatsApp al arrancar
-whatsappService.initialize().then(() => {
-  console.log('🚀 WhatsApp inicializado');
-});
-
-// Iniciar chatbot cuando conecte
-setInterval(() => {
-  if (whatsappService.isConnected() && !chatbotIniciado) {
-    chatbot.iniciar();
-    chatbotIniciado = true;
-    
-    // Registrar handler de mensajes ENTRANTES (respuestas de clientes)
-    // IMPORTANTE: este onMessage SOBRESCRIBE el del chatbot. Por eso aqui
-    // adentro tenemos que: 1) procesar el mensaje con el chatbot para que
-    // genere respuesta automatica, 2) notificar a Fantasma para el panel.
-    whatsappService.onMessage(async (msg) => {
-      // === FIX 2026-05: disparar respuesta automatica del chatbot ===
-      // (procesarMensaje envia la respuesta por WhatsApp). Si falla, no
-      // queremos que se interrumpa el registro en Fantasma.
-      try {
-        await chatbot.procesarMensaje(msg);
-      } catch(e) {
-        console.error('❌ Error en chatbot.procesarMensaje:', e.message);
-      }
-      
-      try {
-        const remoteJid = msg.key.remoteJid;
-        let telefono = remoteJid.split('@')[0];
-        
-        // Resolver LID a telefono real
-        // Primero: buscar en el mapa LID del whatsappService
-        let lidResuelto = whatsappService.resolverLID(telefono);
-        if (lidResuelto) {
-          console.log(`🔗 LID ${telefono} resuelto a ${lidResuelto} via lidMap`);
-          telefono = lidResuelto;
-        } else if (telefono.length > 13 || !telefono.match(/^52[1-9]/)) {
-          // Segundo: si hay un envio reciente (ultimos 5 min), asumir que esta respuesta es de ese numero
-          const ultimoEnvio = whatsappService.ultimoEnvio;
-          if (ultimoEnvio && (Date.now() - ultimoEnvio.timestamp) < 300000) {
-            console.log(`🔗 LID ${telefono} asociado a ultimo envio: ${ultimoEnvio.tel10} (hace ${Math.round((Date.now() - ultimoEnvio.timestamp)/1000)}s)`);
-            // Guardar este LID para futuras respuestas
-            whatsappService.lidMap.set(telefono, ultimoEnvio.tel10);
-            telefono = ultimoEnvio.tel10;
-          } else {
-            // Tercero: buscar en chatbot
-            const telResuelto = chatbot.resolverTelefono ? chatbot.resolverTelefono(telefono) : null;
-            if (telResuelto) {
-              console.log(`🔗 LID ${telefono} resuelto a ${telResuelto} via chatbot`);
-              whatsappService.lidMap.set(telefono, telResuelto);
-              telefono = telResuelto;
-            } else {
-              console.log(`⚠️ No se pudo resolver LID ${telefono} - se guarda tal cual`);
-            }
-          }
-        }
-        
-        // Limpiar: quitar 521 o 52 para dejar 10 digitos
-        let tel10 = telefono.replace(/\D/g, '');
-        if (tel10.startsWith('521') && tel10.length === 13) tel10 = tel10.slice(3);
-        else if (tel10.startsWith('52') && tel10.length === 12) tel10 = tel10.slice(2);
-        
-        const texto = msg.message?.conversation 
-          || msg.message?.extendedTextMessage?.text 
-          || msg.message?.imageMessage?.caption
-          || '[media]';
-        const nombre = msg.pushName || tel10;
-        
-        console.log(`📩 Respuesta de ${nombre} (${tel10}): ${texto.substring(0, 80)}`);
-        
-        // Registrar en chatbot local
-        chatbot.registrarInteraccion(tel10, 'recibido', texto, remoteJid);
-        
-        // Notificar al panel fantasmas (guardar en seguimiento_log)
-        const panelBase = process.env.FANTASMA_PANEL_URL || 'https://fantasma-rpgh.onrender.com';
-        
-        try {
-          const resp = await fetch(panelBase + '/api/respuesta-cliente', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                telefono: tel10,
-                mensaje: texto.substring(0, 500),
-                nombre: nombre,
-                timestamp: new Date().toISOString()
-              })
+function ttsSlot() {
+    return new Promise(resolve => {
+        if (ttsEnVuelo < TTS_MAX_CONCURRENT) {
+            ttsEnVuelo++;
+            resolve(() => {
+                ttsEnVuelo--;
+                if (ttsCola.length > 0) {
+                    const next = ttsCola.shift();
+                    ttsEnVuelo++;
+                    next(() => {
+                        ttsEnVuelo--;
+                        if (ttsCola.length > 0) ttsCola.shift()(() => ttsEnVuelo--);
+                    });
+                }
             });
-          const respData = await resp.json();
-          if (respData.success) {
-            console.log(`✅ Respuesta de ${tel10} guardada en panel fantasmas`);
-          } else {
-            console.log(`❌ Panel fantasmas rechazó: ${respData.error || 'unknown'}`);
-          }
-        } catch(e) {
-          console.log(`❌ Error enviando respuesta al panel: ${e.message}`);
+        } else {
+            ttsCola.push(resolve);
         }
-      } catch(e) {
-        console.error('Error procesando mensaje entrante:', e.message);
-      }
     });
-  }
-}, 3000);
+}
 
-// ═══════════════════════════════════════════════════════════
-// RUTAS DE CONEXIÓN
-// ═══════════════════════════════════════════════════════════
-
-app.post('/api/conectar', async (req, res) => {
-  try {
-    if (whatsappService.isConnected()) {
-      return res.json({
-        exito: true,
-        mensaje: 'WhatsApp ya está conectado',
-        info: await whatsappService.getInfoSesion()
-      });
+// ═══ Map por teléfono ═══
+const llamadasPorTelefono = new Map();
+const ultimasLlamadasPorTel = new Map();
+setInterval(() => {
+    const corte = Date.now() - 300000;
+    for (const [tel, t] of ultimasLlamadasPorTel) {
+        if (t < corte) ultimasLlamadasPorTel.delete(tel);
     }
-    await whatsappService.initialize();
-    setTimeout(async () => {
-      res.json({
-        exito: true,
-        mensaje: 'Iniciando conexión...',
-        info: await whatsappService.getInfoSesion()
-      });
-    }, 2000);
-  } catch (error) {
-    res.status(500).json({ exito: false, mensaje: error.message });
-  }
-});
+}, 60000);
+const colaFIFO = [];
 
-app.get('/api/estado', async (req, res) => {
-  try {
-    res.json({
-      conectado: whatsappService.isConnected(),
-      info: await whatsappService.getInfoSesion(),
-      estadisticasEnvio: envioMasivoService.getEstadisticas(),
-      progreso: envioMasivoService.getProgreso(),
-      chatbot: chatbot.getEstadisticas()
-    });
-  } catch (error) {
-    res.status(500).json({ exito: false, mensaje: error.message });
-  }
-});
-
-app.get('/api/qr', (req, res) => {
-  if (whatsappService.isConnected()) {
-    return res.json({ exito: true, conectado: true, qr: null });
-  }
-  const qrData = whatsappService.getQrCode();
-  res.json({
-    exito: true,
-    conectado: false,
-    qr: qrData.qr,
-    timestamp: qrData.timestamp
-  });
-});
-
-app.post('/api/desconectar', async (req, res) => {
-  await whatsappService.cerrarSesion();
-  chatbotIniciado = false;
-  res.json({ exito: true, mensaje: 'Desconectado' });
-});
-
-// ═══════════════════════════════════════════════════════════
-// RUTAS DE ENVÍO MASIVO (NUEVO)
-// ═══════════════════════════════════════════════════════════
-
-// Subir Excel y previsualizar
-app.post('/api/subir-excel', upload.single('archivo'), (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ exito: false, mensaje: 'No se recibió archivo' });
+function registrarLlamada(datos) {
+    if (datos.telefono) {
+        llamadasPorTelefono.set(datos.telefono, { ...datos, originadaEn: Date.now() });
     }
-
-    const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
-    const sheetName = workbook.SheetNames[0];
-    const data = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
-
-    if (data.length === 0) {
-      return res.status(400).json({ exito: false, mensaje: 'Archivo vacío' });
+    colaFIFO.push({ ...datos, originadaEn: Date.now() });
+    const corte = Date.now() - 180000;
+    while (colaFIFO.length > 0 && colaFIFO[0].originadaEn < corte) {
+        const vieja = colaFIFO.shift();
+        if (vieja.telefono) llamadasPorTelefono.delete(vieja.telefono);
     }
-
-    // Cargar al chatbot para que responda cuando contesten
-    const clientesChatbot = data.map(row => {
-      const obj = {
-        nombre: row.nombre || row.Nombre || row.Cliente || row.NOMBRE || 'Cliente',
-        telefono: row.telefono || row.Telefono || row.Teléfono || row.TELEFONO || '',
-        saldo: parseFloat(row.saldo ?? row.Saldo ?? row.SALDO ?? 0) || 0,
-        diasAtraso: parseInt(row.diasAtraso ?? row.DiasAtraso ?? row['Días Atraso'] ?? row.DIASATRASO ?? 0) || 0
-      };
-      return obj;
-    }).filter(c => c.telefono);
-    
-    // Debug: ver qué se cargó
-    if (clientesChatbot.length > 0) {
-      const ej = clientesChatbot[0];
-      console.log(`📋 Ejemplo cartera: ${ej.nombre} | tel:${ej.telefono} | saldo:${ej.saldo} | dias:${ej.diasAtraso}`);
+    for (const [tel, d] of llamadasPorTelefono) {
+        if (d.originadaEn < corte) llamadasPorTelefono.delete(tel);
     }
-    
-    chatbot.cargarCartera(clientesChatbot);
+}
 
-    res.json({
-      exito: true,
-      columnas: Object.keys(data[0]),
-      totalRegistros: data.length,
-      preview: data.slice(0, 5),
-      datos: data,
-      clientesChatbot: clientesChatbot.length
-    });
-  } catch (error) {
-    res.status(500).json({ exito: false, mensaje: error.message });
-  }
-});
+function tomarMasReciente() {
+    if (colaFIFO.length === 0) return null;
+    return colaFIFO.pop();
+}
 
-// Iniciar campaña masiva
-app.post('/api/campana/iniciar', upload.single('imagen'), async (req, res) => {
-  try {
-    let { contactos, plantilla, nombreCampana, config } = req.body;
+function log(msg) {
+    const t = new Date().toISOString().split('T')[1].split('.')[0];
+    console.log('[' + t + '] ' + msg);
+}
 
-    // Parse JSON strings (vienen del FormData)
-    if (typeof contactos === 'string') contactos = JSON.parse(contactos);
-    if (typeof config === 'string') config = JSON.parse(config);
+function buildMsg(kind, payload) {
+    const len = payload ? payload.length : 0;
+    const h = Buffer.alloc(3);
+    h.writeUInt8(kind, 0);
+    h.writeUInt16BE(len, 1);
+    return payload ? Buffer.concat([h, payload]) : h;
+}
 
-    // Imagen si viene
-    let imagen = null;
-    if (req.file) {
-      imagen = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
-    } else if (req.body.imagenBase64) {
-      imagen = req.body.imagenBase64;
-    } else if (req.body.imagenUrl) {
-      imagen = req.body.imagenUrl;
+function calcularRMS(buf) {
+    let sum = 0;
+    for (let i = 0; i < buf.length; i += 2) {
+        const s = buf.readInt16LE(i);
+        sum += s * s;
     }
+    return Math.sqrt(sum / (buf.length / 2));
+}
 
-    const resultado = await envioMasivoService.iniciarCampana({
-      contactos,
-      plantilla,
-      imagen,
-      nombreCampana,
-      config,
-    });
-
-    res.json(resultado);
-  } catch (error) {
-    res.status(500).json({ exito: false, mensaje: error.message });
-  }
-});
-
-// Pausar campaña
-app.post('/api/campana/pausar', (req, res) => {
-  const ok = envioMasivoService.pausar();
-  res.json({ exito: ok, mensaje: ok ? 'Campaña pausada' : 'No hay campaña activa o ya está pausada' });
-});
-
-// Reanudar campaña
-app.post('/api/campana/reanudar', (req, res) => {
-  const ok = envioMasivoService.reanudar();
-  res.json({ exito: ok, mensaje: ok ? 'Campaña reanudada' : 'No hay campaña pausada' });
-});
-
-// Cancelar campaña
-app.post('/api/campana/cancelar', (req, res) => {
-  const ok = envioMasivoService.cancelar();
-  res.json({ exito: ok, mensaje: ok ? 'Campaña cancelada' : 'No hay campaña activa' });
-});
-
-// Force reset (cuando se traba)
-app.post('/api/campana/reset', (req, res) => {
-  envioMasivoService.forceReset();
-  res.json({ exito: true, mensaje: 'Reset completo' });
-});
-
-// Limpiar cache de clientes (borrar JSON viejo)
-app.post('/api/chatbot/limpiar', (req, res) => {
-  try {
-    const fs = require('fs');
-    if (fs.existsSync('chatbot_clientes.json')) {
-      fs.unlinkSync('chatbot_clientes.json');
-    }
-    chatbot.clientes.clear();
-    chatbot.conversaciones.clear();
-    res.json({ exito: true, mensaje: 'Cache limpiado. Sube el Excel de nuevo.' });
-  } catch (e) {
-    res.status(500).json({ exito: false, mensaje: e.message });
-  }
-});
-
-// Progreso en tiempo real
-app.get('/api/campana/progreso', (req, res) => {
-  res.json(envioMasivoService.getProgreso());
-});
-
-// Detalle de la cola
-app.get('/api/campana/detalle', (req, res) => {
-  res.json(envioMasivoService.getDetalleCola());
-});
-
-// Estadísticas completas
-app.get('/api/campana/estadisticas', (req, res) => {
-  res.json(envioMasivoService.getEstadisticas());
-});
-
-// Log en tiempo real del envío masivo
-app.get('/api/campana/logs', (req, res) => {
-  const limite = parseInt(req.query.limite) || 50;
-  res.json(envioMasivoService.getLogs(limite));
-});
-
-// Conversación completa de un teléfono (ida y vuelta)
-app.get('/api/conversacion/:telefono', (req, res) => {
-  const tel = req.params.telefono;
-  const interacciones = chatbot.getInteracciones(100, tel);
-  const cliente = chatbot.obtenerCliente(tel);
-  const conv = chatbot.obtenerConversacion(tel);
-  res.json({
-    cliente,
-    estado: conv.estado || 'sin_conversacion',
-    gestor: conv.gestor || null,
-    mensajes: interacciones,
-  });
-});
-
-// Actualizar configuración de delays
-app.post('/api/campana/config', (req, res) => {
-  const config = envioMasivoService.actualizarConfig(req.body);
-  res.json({ exito: true, config });
-});
-
-// Enviar mensaje individual (test)
-app.post('/api/enviar-mensaje', async (req, res) => {
-  try {
-    const { telefono, mensaje } = req.body;
-    if (!telefono || !mensaje) {
-      return res.status(400).json({ exito: false, mensaje: 'Faltan telefono y mensaje' });
-    }
-    const resultado = await whatsappService.enviarMensaje(telefono, mensaje);
-    res.json(resultado);
-  } catch (error) {
-    res.status(500).json({ exito: false, mensaje: error.message });
-  }
-});
-
-// Compatibilidad con envío masivo viejo
-app.post('/api/enviar-masivo', async (req, res) => {
-  try {
-    const { contactos, plantilla, columnaTeléfono } = req.body;
-
-    if (!contactos?.length || !plantilla) {
-      return res.status(400).json({ exito: false, mensaje: 'Faltan contactos o plantilla' });
-    }
-
-    const clientesChatbot = contactos.map(c => ({
-      nombre: c.Cliente || c.nombre,
-      telefono: c[columnaTeléfono] || c.telefono,
-      saldo: parseFloat(c.Saldo || c.saldo || c.monto || 0),
-      diasAtraso: parseInt(c['Días Atraso'] || c.diasAtraso || 0)
-    }));
-    chatbot.cargarCartera(clientesChatbot);
-
-    envioMasivoService.enviarMasivoFlexible(contactos, plantilla, columnaTeléfono);
-
-    res.json({
-      exito: true,
-      mensaje: `Envío iniciado: ${contactos.length} contactos`,
-      chatbotActivo: true
-    });
-  } catch (error) {
-    res.status(500).json({ exito: false, mensaje: error.message });
-  }
-});
-
-app.get('/api/estadisticas', (req, res) => {
-  res.json({
-    ...envioMasivoService.getEstadisticas(),
-    chatbot: chatbot.getEstadisticas()
-  });
-});
-
-// ═══════════════════════════════════════════════════════════
-// RUTAS CHATBOT
-// ═══════════════════════════════════════════════════════════
-
-app.post('/api/chatbot/cartera', (req, res) => {
-  try {
-    const { clientes } = req.body;
-    if (!Array.isArray(clientes)) {
-      return res.status(400).json({ error: 'Se requiere array de clientes' });
-    }
-    const total = chatbot.cargarCartera(clientes);
-    res.json({ exito: true, mensaje: `${clientes.length} clientes cargados`, total });
-  } catch (error) {
-    res.status(500).json({ exito: false, error: error.message });
-  }
-});
-
-app.get('/api/chatbot/estadisticas', (req, res) => {
-  res.json(chatbot.getEstadisticas());
-});
-
-app.get('/api/chatbot/interacciones', (req, res) => {
-  const { limite, telefono } = req.query;
-  res.json(chatbot.getInteracciones(parseInt(limite) || 50, telefono));
-});
-
-app.get('/api/chatbot/conversaciones', (req, res) => {
-  res.json(chatbot.getConversaciones());
-});
-
-app.get('/api/chatbot/gestores', (req, res) => {
-  res.json({ gestores: chatbot.gestores });
-});
-
-app.post('/api/chatbot/gestores', (req, res) => {
-  const { gestores } = req.body;
-  if (gestores) chatbot.gestores = gestores;
-  res.json({ exito: true, gestores: chatbot.gestores });
-});
-
-// ═══════════════════════════════════════════════════════════
-// EXPORTAR A EXCEL
-// ═══════════════════════════════════════════════════════════
-
-app.get('/api/exportar/interacciones', (req, res) => {
-  try {
-    const interacciones = chatbot.getInteracciones(500);
-    if (interacciones.length === 0) {
-      return res.status(404).json({ error: 'No hay interacciones para exportar' });
-    }
-    const datos = interacciones.map(i => ({
-      'Fecha': new Date(i.timestamp).toLocaleDateString('es-MX'),
-      'Hora': new Date(i.timestamp).toLocaleTimeString('es-MX'),
-      'Teléfono': i.telefono,
-      'Tipo': i.tipo,
-      'Detalle': i.detalle
-    }));
-    const ws = XLSX.utils.json_to_sheet(datos);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Interacciones');
-    ws['!cols'] = [{ wch: 12 }, { wch: 10 }, { wch: 15 }, { wch: 15 }, { wch: 50 }];
-    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
-    const fecha = new Date().toISOString().split('T')[0];
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename=Interacciones_${fecha}.xlsx`);
-    res.send(buffer);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.get('/api/exportar/conversaciones', (req, res) => {
-  try {
-    const conversaciones = chatbot.getConversaciones();
-    if (conversaciones.length === 0) {
-      return res.status(404).json({ error: 'No hay conversaciones activas' });
-    }
-    const datos = conversaciones.map(c => ({
-      'Teléfono': c.telefono,
-      'Estado': c.estado,
-      'Gestor Asignado': c.gestor?.nombre || 'N/A',
-      'Última Actividad': c.timestamp ? new Date(c.timestamp).toLocaleString('es-MX') : 'N/A'
-    }));
-    const ws = XLSX.utils.json_to_sheet(datos);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Conversaciones');
-    ws['!cols'] = [{ wch: 15 }, { wch: 20 }, { wch: 20 }, { wch: 20 }];
-    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
-    const fecha = new Date().toISOString().split('T')[0];
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename=Conversaciones_${fecha}.xlsx`);
-    res.send(buffer);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.get('/api/exportar/clientes', (req, res) => {
-  try {
-    const clientes = [...chatbot.clientes.values()];
-    if (clientes.length === 0) {
-      return res.status(404).json({ error: 'No hay clientes cargados' });
-    }
-    const datos = clientes.map(c => ({
-      'Nombre': c.nombre || 'N/A',
-      'Teléfono': c.telefono || 'N/A',
-      'Saldo': c.saldo || 0,
-      'Días Atraso': c.diasAtraso || 0
-    }));
-    const ws = XLSX.utils.json_to_sheet(datos);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Clientes');
-    ws['!cols'] = [{ wch: 30 }, { wch: 15 }, { wch: 12 }, { wch: 12 }];
-    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
-    const fecha = new Date().toISOString().split('T')[0];
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename=Clientes_Bot_${fecha}.xlsx`);
-    res.send(buffer);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.get('/api/exportar/reporte', (req, res) => {
-  try {
-    const wb = XLSX.utils.book_new();
-    const fecha = new Date().toISOString().split('T')[0];
-    
-    const stats = chatbot.getEstadisticas();
-    const resumen = [
-      { 'Métrica': 'Clientes Registrados', 'Valor': stats.clientesRegistrados },
-      { 'Métrica': 'Conversaciones Activas', 'Valor': stats.conversacionesActivas },
-      { 'Métrica': 'Interacciones Hoy', 'Valor': stats.interaccionesHoy },
-      { 'Métrica': 'ChatBot Activo', 'Valor': stats.activo ? 'Sí' : 'No' },
-      { 'Métrica': 'Fecha Reporte', 'Valor': new Date().toLocaleString('es-MX') }
-    ];
-    const wsResumen = XLSX.utils.json_to_sheet(resumen);
-    wsResumen['!cols'] = [{ wch: 25 }, { wch: 20 }];
-    XLSX.utils.book_append_sheet(wb, wsResumen, 'Resumen');
-    
-    const interacciones = chatbot.getInteracciones(500).map(i => ({
-      'Fecha': new Date(i.timestamp).toLocaleDateString('es-MX'),
-      'Hora': new Date(i.timestamp).toLocaleTimeString('es-MX'),
-      'Teléfono': i.telefono,
-      'Tipo': i.tipo,
-      'Detalle': i.detalle
-    }));
-    if (interacciones.length > 0) {
-      const wsInter = XLSX.utils.json_to_sheet(interacciones);
-      wsInter['!cols'] = [{ wch: 12 }, { wch: 10 }, { wch: 15 }, { wch: 15 }, { wch: 50 }];
-      XLSX.utils.book_append_sheet(wb, wsInter, 'Interacciones');
-    }
-    
-    const conversaciones = chatbot.getConversaciones().map(c => ({
-      'Teléfono': c.telefono,
-      'Estado': c.estado,
-      'Gestor': c.gestor?.nombre || 'N/A',
-      'Última Actividad': c.timestamp ? new Date(c.timestamp).toLocaleString('es-MX') : 'N/A'
-    }));
-    if (conversaciones.length > 0) {
-      const wsConv = XLSX.utils.json_to_sheet(conversaciones);
-      wsConv['!cols'] = [{ wch: 15 }, { wch: 20 }, { wch: 20 }, { wch: 20 }];
-      XLSX.utils.book_append_sheet(wb, wsConv, 'Conversaciones');
-    }
-    
-    const gestores = stats.gestores.map(g => ({
-      'Nombre': g.nombre,
-      'Teléfono': g.telefono,
-      'Activo': g.activo ? 'Sí' : 'No'
-    }));
-    const wsGest = XLSX.utils.json_to_sheet(gestores);
-    wsGest['!cols'] = [{ wch: 20 }, { wch: 15 }, { wch: 10 }];
-    XLSX.utils.book_append_sheet(wb, wsGest, 'Gestores');
-    
-    // Hoja 5: Resultados de campaña masiva
-    const detalleCola = envioMasivoService.getDetalleCola();
-    if (detalleCola.length > 0) {
-      const wsCamp = XLSX.utils.json_to_sheet(detalleCola.map(d => ({
-        'Nombre': d.nombre,
-        'Teléfono': d.telefono,
-        'Estado': d.estado,
-        'Error': d.error || '',
-        'Enviado': d.enviadoEn || ''
-      })));
-      wsCamp['!cols'] = [{ wch: 25 }, { wch: 15 }, { wch: 12 }, { wch: 30 }, { wch: 20 }];
-      XLSX.utils.book_append_sheet(wb, wsCamp, 'Campaña Masiva');
-    }
-    
-    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename=Reporte_ChatBot_${fecha}.xlsx`);
-    res.send(buffer);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ═══════════════════════════════════════════════════════════
-// INTEGRACION FANTASMA-RPGH (NUEVO)
-// Endpoints para que el sistema de seguimiento de fantasmas
-// pueda enviar mensajes individuales via este bot.
-// ═══════════════════════════════════════════════════════════
-
-/**
- * GET /api/status
- * Health check publico para que fantasma-rpgh sepa si el bot esta conectado.
- * Sin autenticacion (es solo lectura de estado).
- */
-app.get('/api/status', (req, res) => {
-  try {
-    res.json({
-      ok: true,
-      conectado: whatsappService.isConnected(),
-      chatbotActivo: chatbot.activo || false,
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    res.status(500).json({ ok: false, error: error.message });
-  }
-});
-
-/**
- * POST /api/enviar-individual
- * Endpoint AUTENTICADO para enviar UN mensaje desde otro servicio.
- * 
- * Headers requeridos:
- *   Content-Type: application/json
- *   Authorization: Bearer <BOT_API_TOKEN>
- * 
- * Body: { "telefono": "525512345678", "mensaje": "Hola..." }
- * 
- * Configurar variable de entorno BOT_API_TOKEN en Render.
- */
-app.post('/api/enviar-individual', async (req, res) => {
-  try {
-    // 1. Validar token
-    const tokenEsperado = process.env.BOT_API_TOKEN;
-    if (!tokenEsperado) {
-      return res.status(500).json({ 
-        success: false, 
-        error: 'BOT_API_TOKEN no configurado en variables de entorno' 
-      });
-    }
-    
-    const authHeader = req.headers.authorization || '';
-    const tokenRecibido = authHeader.replace(/^Bearer\s+/i, '').trim();
-    
-    if (tokenRecibido !== tokenEsperado) {
-      console.warn('[API] Intento de envio con token invalido');
-      return res.status(401).json({ 
-        success: false, 
-        error: 'Token invalido' 
-      });
-    }
-    
-    // 2. Validar parametros
-    const { telefono, mensaje, cliente } = req.body;
-    
-    if (!telefono || !mensaje) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'telefono y mensaje son requeridos' 
-      });
-    }
-    
-    // 3. Verificar que WhatsApp este conectado
-    if (!whatsappService.isConnected()) {
-      return res.status(503).json({ 
-        success: false, 
-        error: 'WhatsApp no conectado. Escanea el QR primero.' 
-      });
-    }
-    
-    // 3.5 v3.1: Si Fantasma manda datos del cliente, los registramos
-    //          en el chatbot ANTES de enviar el mensaje. Así cuando el
-    //          cliente conteste, el bot ya lo reconoce y puede proponer
-    //          convenio directo sin pedir identificación.
-    //
-    //          Si no manda datos pero el teléfono tiene nombre/saldo en
-    //          el cuerpo del mensaje no podemos extraerlos: Fantasma DEBE
-    //          incluir cliente:{nombre, saldo, diasAtraso} en el POST.
-    if (cliente && typeof cliente === 'object') {
-      try {
-        chatbot.registrarCliente({
-          telefono: telefono,
-          nombre: cliente.nombre,
-          saldo: cliente.saldo,
-          diasAtraso: cliente.diasAtraso
+async function generarTTS(texto, archivo) {
+    const release = await ttsSlot();
+    try {
+        return await new Promise((resolve, reject) => {
+            const mp3 = archivo + '.mp3';
+            const ett = spawn('edge-tts', ['--voice', TTS_VOICE, '--rate=' + TTS_RATE, '--text', texto, '--write-media', mp3]);
+            ett.on('close', code => {
+                if (code !== 0) return reject(new Error('edge-tts fallo'));
+                const ff = spawn('ffmpeg', ['-y', '-loglevel', 'error', '-i', mp3,
+                    '-af', 'highpass=f=300, lowpass=f=3400, dynaudnorm=p=0.9:m=10, aresample=8000:resampler=soxr:precision=33',
+                    '-ar', '8000', '-ac', '1', '-acodec', 'pcm_s16le', '-f', 's16le', archivo]);
+                ff.on('close', c => {
+                    try { fs.unlinkSync(mp3); } catch(e){}
+                    if (c === 0) resolve();
+                    else reject(new Error('ffmpeg fallo'));
+                });
+            });
         });
-      } catch(e) {
-        console.warn('[API] No se pudo registrar cliente en chatbot:', e.message);
-      }
-    } else {
-      console.log(`[API] ⚠️ Envío sin datos de cliente para ${telefono}. Bot no podrá reconocerlo cuando responda.`);
+    } finally {
+        if (typeof release === 'function') release();
     }
-    
-    // 4. Enviar mensaje usando el servicio existente
-    console.log('[API] Enviando a ' + telefono + ': ' + String(mensaje).substring(0, 50) + '...');
-    
-    const resultado = await whatsappService.enviarMensaje(telefono, mensaje);
-    
-    // 5. Registrar interaccion en el chatbot (para que aparezca en logs)
+}
+
+async function obtenerAudioCacheado(texto, prefijo = 'cache', dir = RESPUESTAS_DIR) {
+    const hash = crypto.createHash('md5').update(texto).digest('hex').substring(0, 12);
+    const archivo = path.join(dir, prefijo + '_' + hash + '.raw');
+    if (!fs.existsSync(archivo)) {
+        log('  🎙️ Generando audio nuevo: "' + texto.substring(0, 50) + '..."');
+        await generarTTS(texto, archivo);
+    }
+    return fs.readFileSync(archivo);
+}
+
+async function generarAudioFresco(texto) {
+    // Para respuestas dinámicas de Claude (no cachea, cada turno es único)
+    const archivo = path.join(RESPUESTAS_DIR, 'dyn_' + Date.now() + '_' + Math.random().toString(36).slice(2,8) + '.raw');
+    await generarTTS(texto, archivo);
+    const buf = fs.readFileSync(archivo);
+    try { fs.unlinkSync(archivo); } catch(e){}
+    return buf;
+}
+
+function nombreCorto(nombreCompleto) {
+    if (!nombreCompleto) return null;
+    const partes = nombreCompleto.trim().split(/\s+/);
+    if (partes.length === 0) return null;
+    if (partes.length === 1) return partes[0];
+    return partes[0] + ' ' + partes[1];
+}
+
+function construirSaludo(datos) {
+    const despacho = datos.despacho || DESPACHO_DEFAULT;
+    const nombre = nombreCorto(datos.nombre);
+    if (nombre) {
+        return `Buenas tardes, ¿hablo con ${nombre}?`;
+    }
+    return `Buenas tardes, le hablo de ${despacho}. ¿Con quién tengo el gusto?`;
+}
+
+// ═══ FRASES PUENTE (cacheadas, se reproducen mientras Claude piensa) ═══
+const FRASES_PUENTE = [
+    'Permítame.',
+    'Un segundo.'
+];
+
+async function precalentarPuentes() {
+    log('Pre-generando frases puente...');
+    for (const frase of FRASES_PUENTE) {
+        try { await obtenerAudioCacheado(frase, 'puente', PUENTES_DIR); }
+        catch(e) { log('  ⚠ Error pre-gen puente: ' + e.message); }
+    }
+    log('Puentes listos ✓');
+}
+
+async function obtenerPuenteRandom() {
+    const frase = FRASES_PUENTE[Math.floor(Math.random() * FRASES_PUENTE.length)];
+    return obtenerAudioCacheado(frase, 'puente', PUENTES_DIR);
+}
+
+// ═══ REPORTES A FANTASMA ═══
+async function reportarResultado(datos) {
+    if (!FANTASMA_URL || !IVR_API_TOKEN) return;
     try {
-      if (resultado && (resultado.exito === true || resultado.success === true)) {
-        chatbot.registrarInteraccion(
-          telefono, 
-          'enviado', 
-          '[Fantasma] ' + String(mensaje).substring(0, 50),
-          telefono + '@s.whatsapp.net'
-        );
-      }
-    } catch(e) { /* no romper si falla el log */ }
-    
-    // 6. Respuesta uniforme con success
-    const exito = resultado && (resultado.exito === true || resultado.success === true);
-    
-    res.json({
-      success: exito,
-      message: exito ? 'Mensaje enviado' : 'Falla al enviar',
-      detalle: resultado,
-      telefono: telefono,
-      timestamp: new Date().toISOString()
-    });
-    
-  } catch (error) {
-    console.error('[API] Error en /api/enviar-individual:', error.message);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
-    });
-  }
-});
+        await fetch(FANTASMA_URL + '/api/resultado-llamada', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + IVR_API_TOKEN },
+            body: JSON.stringify(datos)
+        });
+    } catch(e) { log('  ⚠ Error reportando Fantasma: ' + e.message); }
+}
 
-// ═══════════════════════════════════════════════════════════
-// v3.1 (2026-05): REGISTRAR CLIENTE SIN ENVIAR MENSAJE
-// ═══════════════════════════════════════════════════════════
-
-/**
- * POST /api/registrar-cliente
- * Permite a Fantasma (u otro sistema) registrar un cliente en la cartera
- * del chatbot sin enviar mensaje. Esto sirve para que cuando el cliente
- * conteste por su propia cuenta a un mensaje enviado por otro canal,
- * el bot ya lo reconozca y dispare el flujo de convenio.
- * 
- * Headers: Authorization: Bearer <BOT_API_TOKEN>
- * Body: { "telefono": "5512345678", "cliente": { "nombre": "...", "saldo": 8500, "diasAtraso": 73 } }
- */
-app.post('/api/registrar-cliente', async (req, res) => {
-  try {
-    const tokenEsperado = process.env.BOT_API_TOKEN;
-    if (!tokenEsperado) {
-      return res.status(500).json({ success: false, error: 'BOT_API_TOKEN no configurado' });
+// ═══ REGISTRAR PROMESA EN FANTASMA (Postgres) ═══
+// Cambio v10 final: NO escribimos al GAS (Google bloquea POSTs anónimos a Apps Script).
+// En su lugar, mandamos la promesa a Fantasma, que la guarda en Postgres.
+// El sheet de Promesas sigue recibiendo las del HTML manual desde navegador.
+async function registrarPromesaEnFantasma(datos) {
+    if (!FANTASMA_URL || !IVR_API_TOKEN) {
+        log('  ⚠ Fantasma no configurado - promesa NO registrada');
+        return { ok: false, error: 'sin_fantasma' };
     }
-    const tokenRecibido = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
-    if (tokenRecibido !== tokenEsperado) {
-      return res.status(401).json({ success: false, error: 'Token invalido' });
-    }
-    
-    const { telefono, cliente } = req.body;
-    if (!telefono || !cliente) {
-      return res.status(400).json({ success: false, error: 'telefono y cliente requeridos' });
-    }
-    
-    const registrado = chatbot.registrarCliente({
-      telefono,
-      nombre: cliente.nombre,
-      saldo: cliente.saldo,
-      diasAtraso: cliente.diasAtraso
-    });
-    
-    if (!registrado) {
-      return res.status(400).json({ success: false, error: 'No se pudo registrar (teléfono inválido?)' });
-    }
-    
-    res.json({
-      success: true,
-      message: 'Cliente registrado en cartera del bot',
-      cliente: registrado
-    });
-  } catch (error) {
-    console.error('[API] Error en /api/registrar-cliente:', error.message);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// ═══════════════════════════════════════════════════════════
-// VERIFICAR SI NUMERO EXISTE EN WHATSAPP
-// ═══════════════════════════════════════════════════════════
-
-/**
- * POST /api/verificar-numero
- * Verifica si un numero tiene WhatsApp.
- * Body: { "telefono": "5512345678" }
- * Respuesta: { "success": true, "existe": true/false, "telefono": "..." }
- */
-app.post('/api/verificar-numero', async (req, res) => {
-  try {
-    const tokenEsperado = process.env.BOT_API_TOKEN;
-    if (tokenEsperado) {
-      const authHeader = req.headers.authorization || '';
-      const tokenRecibido = authHeader.replace(/^Bearer\s+/i, '').trim();
-      if (tokenRecibido !== tokenEsperado) {
-        return res.status(401).json({ success: false, error: 'Token invalido' });
-      }
-    }
-
-    const { telefono } = req.body;
-    if (!telefono) {
-      return res.status(400).json({ success: false, error: 'telefono requerido' });
-    }
-
-    if (!whatsappService.isConnected()) {
-      return res.status(503).json({ success: false, error: 'WhatsApp no conectado' });
-    }
-
-    const jid = whatsappService.formatearNumero(telefono);
-    const numero = jid.split('@')[0];
-
     try {
-      const [result] = await whatsappService.sock.onWhatsApp(numero);
-      const existe = !!(result && result.exists);
-      res.json({ success: true, existe, telefono, jid: result?.jid || jid });
-    } catch (e) {
-      res.json({ success: true, existe: false, telefono, error: e.message });
+        const payload = {
+            telefono: datos.telefono || '',
+            cliente: datos.nombre || '',
+            promesa: {
+                fecha: datos.fecha || '',
+                monto: datos.monto || 0,
+                nota: datos.observaciones || '',
+                registrada: new Date().toISOString(),
+                estado: 'pendiente',
+                cobrador: 'bot_v10'
+            }
+        };
+        const resp = await fetch(FANTASMA_URL + '/api/promesa-bot', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + IVR_API_TOKEN
+            },
+            body: JSON.stringify(payload)
+        });
+        const text = await resp.text();
+        let resp_json = null;
+        try { resp_json = JSON.parse(text); } catch(_) {}
+        if (resp_json && resp_json.success) {
+            log('  ✅ Promesa guardada en Fantasma/Postgres');
+            return { ok: true, response: text };
+        } else {
+            log('  ⚠ Fantasma respondió sin success: ' + text.substring(0, 200));
+            return { ok: false, error: (resp_json && resp_json.error) || text.substring(0, 200) };
+        }
+    } catch(e) {
+        log('  ❌ Error registrando promesa en Fantasma: ' + e.message);
+        return { ok: false, error: e.message };
     }
+}
 
-  } catch (error) {
-    console.error('[API] Error verificar-numero:', error.message);
-    res.status(500).json({ success: false, error: error.message });
-  }
+// ═══ CALCULADORA DE CONVENIO ═══
+// Reglas LeGaXi v10.2:
+//   - Pago semanal MÍNIMO: $500 (nunca menos)
+//   - Si saldo/500 ≤ 4 semanas: SIN recargo, pago directo de $500
+//   - Si saldo/500 > 4 semanas: aplicar 15% de recargo
+//   - Si las semanas resultantes ≤ 104: mantener $500/sem (puede ser 53, 80, 99, etc)
+//   - Si pasa de 104 semanas: forzar tope 104 y SUBIR el pago semanal proporcionalmente
+// ═══ FECHA AUTOMÁTICA: VIERNES O LUNES PRÓXIMO (el que llegue antes) ═══
+function calcularFechaProximoPago() {
+    const hoy = new Date();
+    const dow = hoy.getDay(); // 0=domingo, 1=lunes, ..., 5=viernes, 6=sábado
+    
+    // Días restantes hasta el próximo viernes (incluye hoy si es antes de mediodía)
+    let diasAViernes;
+    if (dow < 5) diasAViernes = 5 - dow;        // antes del viernes
+    else if (dow === 5) diasAViernes = 7;       // hoy es viernes, ir al siguiente
+    else diasAViernes = 5 + (7 - dow);          // sábado o domingo
+    
+    // Días restantes hasta el próximo lunes
+    let diasALunes;
+    if (dow === 0) diasALunes = 1;              // domingo → mañana lunes
+    else if (dow === 1) diasALunes = 7;         // hoy es lunes, ir al siguiente
+    else diasALunes = (8 - dow) % 7;            // martes a sábado
+    
+    // Elegir el más cercano
+    const dias = Math.min(diasAViernes, diasALunes);
+    const fecha = new Date(hoy);
+    fecha.setDate(hoy.getDate() + dias);
+    
+    const yyyy = fecha.getFullYear();
+    const mm = String(fecha.getMonth() + 1).padStart(2, '0');
+    const dd = String(fecha.getDate()).padStart(2, '0');
+    const diaNombre = ['domingo','lunes','martes','miércoles','jueves','viernes','sábado'][fecha.getDay()];
+    
+    return {
+        iso: `${yyyy}-${mm}-${dd}`,
+        diaNombre: diaNombre,
+        legible: `${diaNombre} ${dd} de ${['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'][fecha.getMonth()]}`
+    };
+}
+
+function calcularConvenio(saldoOriginal) {
+    const saldo = parseFloat(saldoOriginal) || 0;
+    if (saldo <= 0) {
+        return { error: 'Saldo inválido', saldo };
+    }
+    
+    const PAGO_BASE = 500;
+    const RECARGO_PCT = 0.15;
+    const SEMANAS_LIMITE_RECARGO = 4;   // hasta 4 semanas NO hay recargo
+    const SEMANAS_TOPE_DURO = 104;      // máximo absoluto de semanas
+    
+    // Paso 1: ¿aplica recargo?
+    const semanasSinRecargo = Math.ceil(saldo / PAGO_BASE);
+    let aplicaRecargo = false;
+    let saldoFinal = saldo;
+    
+    if (semanasSinRecargo > SEMANAS_LIMITE_RECARGO) {
+        aplicaRecargo = true;
+        saldoFinal = saldo * (1 + RECARGO_PCT);
+    }
+    
+    // Paso 2: calcular semanas a $500/sem
+    let semanas = Math.ceil(saldoFinal / PAGO_BASE);
+    let pagoSemanal = PAGO_BASE;
+    let topeAplicado = null;
+    
+    // Paso 3: si pasa de 104 semanas, capar a 104 y SUBIR el pago semanal
+    if (semanas > SEMANAS_TOPE_DURO) {
+        semanas = SEMANAS_TOPE_DURO;
+        pagoSemanal = Math.ceil(saldoFinal / semanas);
+        topeAplicado = 'pago_ajustado_al_alza';
+    }
+    
+    return {
+        saldo_original: Math.round(saldo * 100) / 100,
+        recargo_aplicado: aplicaRecargo,
+        recargo_monto: aplicaRecargo ? Math.round((saldoFinal - saldo) * 100) / 100 : 0,
+        saldo_total_convenio: Math.round(saldoFinal * 100) / 100,
+        semanas: semanas,
+        pago_semanal: pagoSemanal,
+        tope_aplicado: topeAplicado
+    };
+}
+
+// ═══ REGISTRAR CONVENIO EN FANTASMA ═══
+async function registrarConvenioEnFantasma(datos) {
+    if (!FANTASMA_URL || !IVR_API_TOKEN) {
+        log('  ⚠ Fantasma no configurado - convenio NO registrado');
+        return { ok: false, error: 'sin_fantasma' };
+    }
+    try {
+        const payload = {
+            telefono: datos.telefono || '',
+            cliente: datos.nombre || '',
+            convenio: {
+                saldo_original: datos.saldo_original,
+                saldo_total: datos.saldo_total,
+                semanas: datos.semanas,
+                pago_semanal: datos.pago_semanal,
+                recargo_aplicado: datos.recargo_aplicado,
+                primera_fecha: datos.primera_fecha || '',
+                nota: datos.observaciones || '',
+                registrado: new Date().toISOString(),
+                estado: 'activo',
+                cobrador: 'bot_v10'
+            }
+        };
+        const resp = await fetch(FANTASMA_URL + '/api/convenio-bot', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + IVR_API_TOKEN
+            },
+            body: JSON.stringify(payload)
+        });
+        const text = await resp.text();
+        let resp_json = null;
+        try { resp_json = JSON.parse(text); } catch(_) {}
+        if (resp_json && resp_json.success) {
+            log('  ✅ Convenio guardado en Fantasma/Postgres');
+            return { ok: true, response: text };
+        } else {
+            log('  ⚠ Fantasma respondió sin success: ' + text.substring(0, 200));
+            return { ok: false, error: (resp_json && resp_json.error) || text.substring(0, 200) };
+        }
+    } catch(e) {
+        log('  ❌ Error registrando convenio en Fantasma: ' + e.message);
+        return { ok: false, error: e.message };
+    }
+}
+
+// ═══ TOOLS QUE CLAUDE PUEDE LLAMAR ═══
+const CLAUDE_TOOLS = [
+    {
+        name: 'registrar_promesa',
+        description: 'Registra una promesa de pago ÚNICO COMPLETO del saldo. Usar SOLO cuando el deudor confirme una fecha específica Y se compromete a pagar el SALDO COMPLETO (o casi completo). NO usar para abonos pequeños, pagos parciales bajos, ni para "voy a ver". Para pagos en parcialidades usa proponer_convenio.',
+        input_schema: {
+            type: 'object',
+            properties: {
+                fecha: { type: 'string', description: 'Fecha del pago en formato YYYY-MM-DD. Si el deudor dice "el viernes", calcula la fecha real.' },
+                monto: { type: 'number', description: 'Monto en pesos mexicanos (sin símbolo $). Debe ser razonable según el saldo del cliente.' },
+                observaciones: { type: 'string', description: 'Contexto relevante: por qué se atrasó, situación del cliente, lugar de pago acordado, etc.' }
+            },
+            required: ['fecha', 'monto']
+        }
+    },
+    {
+        name: 'marcar_equivocado',
+        description: 'Marca la llamada como número equivocado. Usar cuando la persona claramente NO conoce al deudor.',
+        input_schema: {
+            type: 'object',
+            properties: {
+                detalle: { type: 'string', description: 'Qué dijo la persona' }
+            }
+        }
+    },
+    {
+        name: 'marcar_no_esta',
+        description: 'Marca que el deudor no se encuentra pero hay un tercero que sí lo conoce. Usar cuando familiar/conocido contesta.',
+        input_schema: {
+            type: 'object',
+            properties: {
+                quien_contesto: { type: 'string', description: 'Quién contestó: esposa, hijo, vecino, etc.' },
+                recado_dejado: { type: 'boolean', description: 'Si se le dejó recado de devolver llamada' }
+            }
+        }
+    },
+    {
+        name: 'proponer_convenio',
+        description: 'PRIMERA ACCIÓN PRINCIPAL del bot: calcula el plan de pagos semanales para proponerlo proactivamente al cliente. ÚSALA SIEMPRE al inicio de la negociación, ANTES de hablar de números al cliente. NO esperes a que el cliente diga que no puede pagar - el plan es la oferta inicial. Esta tool solo CALCULA, no registra. Devuelve: semanas, pago_semanal ($500 mínimo), saldo_total con recargo 15% si aplica.',
+        input_schema: {
+            type: 'object',
+            properties: {
+                motivo: { type: 'string', description: 'Contexto de la llamada (ej: oferta inicial, cliente pidió parcialidades, cliente rechazó pago único)' }
+            }
+        }
+    },
+    {
+        name: 'registrar_convenio',
+        description: 'Registra el convenio acordado. Usar APENAS el cliente acepte el plan (diga "sí", "ok", "está bien"). NO preguntes la fecha al cliente - manda "AUTO" en primera_fecha y el sistema la asignará automáticamente al próximo viernes o lunes. El sistema te devolverá el día asignado para que se lo digas al cliente.',
+        input_schema: {
+            type: 'object',
+            properties: {
+                semanas: { type: 'number', description: 'Número total de semanas del convenio (lo devuelve proponer_convenio)' },
+                pago_semanal: { type: 'number', description: 'Pago semanal en pesos (lo devuelve proponer_convenio)' },
+                saldo_total: { type: 'number', description: 'Saldo total del convenio incluyendo recargo si aplica (lo devuelve proponer_convenio)' },
+                primera_fecha: { type: 'string', description: 'Manda "AUTO" y el sistema asigna automáticamente próximo viernes o lunes. Solo manda fecha específica YYYY-MM-DD si el cliente PIDIÓ otro día.' },
+                observaciones: { type: 'string', description: 'Notas: situación del cliente, etc.' }
+            },
+            required: ['semanas', 'pago_semanal', 'saldo_total', 'primera_fecha']
+        }
+    },
+    {
+        name: 'marcar_rechazo',
+        description: 'Marca rechazo definitivo del deudor a pagar o a continuar la llamada.',
+        input_schema: {
+            type: 'object',
+            properties: {
+                razon: { type: 'string', description: 'Por qué rechazó: agresivo, dice que no debe, pide no llamar, etc.' }
+            }
+        }
+    },
+    {
+        name: 'terminar_llamada',
+        description: 'Termina la llamada de forma cortés. Usar cuando ya no hay nada que negociar o la conversación se agotó sin acuerdo.',
+        input_schema: {
+            type: 'object',
+            properties: {
+                resultado: {
+                    type: 'string',
+                    enum: ['SIN_ACUERDO', 'CONTACTO_EFECTIVO', 'RECHAZO', 'EQUIVOCADO', 'NO_ESTA', 'PROMESA_OBTENIDA', 'CONVENIO_ACORDADO'],
+                    description: 'Resultado final de la llamada'
+                },
+                resumen: { type: 'string', description: 'Resumen breve de qué pasó en la llamada' }
+            },
+            required: ['resultado']
+        }
+    }
+];
+
+// ═══ PROMPT DEL SISTEMA (Tono B - cercano y empático) ═══
+function construirSystemPrompt(datos) {
+    const despacho = datos.despacho || DESPACHO_DEFAULT;
+    const acreedor = datos.acreedor || ACREEDOR_DEFAULT;
+    const nombre = datos.nombre || 'cliente';
+    const saldo = datos.saldo || 'pendiente';
+    const diasAtraso = datos.dias_atraso || datos.diasAtraso || 'varios';
+    const retorno = datos.telefono_retorno || RETORNO_DEFAULT;
+    
+    const hoy = new Date();
+    const fechaHoy = hoy.toISOString().split('T')[0];
+    const diaSemana = ['domingo','lunes','martes','miércoles','jueves','viernes','sábado'][hoy.getDay()];
+    
+    return `Eres un agente telefónico de cobranza PROFESIONAL de ${despacho}, despacho que gestiona cuentas para ${acreedor}.
+
+TU PERFIL: Eres un cobrador comercial experimentado. Firme, directo, pero educado. NO eres complaciente ni sumiso. Sabes que tu trabajo es recuperar dinero adeudado, no hacer amistad. Eres como un gerente de cobranza serio: tratas con respeto al cliente pero NO aceptas excusas vagas ni pagos ridículos. Tienes la oferta lista, la presentas con seguridad, y conduces al cliente a aceptarla.
+
+DATOS DEL CLIENTE QUE LLAMAS:
+- Nombre: ${nombre}
+- Saldo vencido: $${saldo}
+- Días de atraso: ${diasAtraso}
+- Teléfono de retorno: ${retorno}
+- Acreedor: ${acreedor}
+
+CONTEXTO TEMPORAL:
+- Hoy es ${diaSemana}, ${fechaHoy}
+- Cuando el cliente diga "mañana", "el viernes", "la próxima semana", calcula la fecha real en formato YYYY-MM-DD
+
+═══ TU OBJETIVO ═══
+Cerrar HOY un convenio de pagos semanales firme. El plan de $500 a la semana es la MEJOR oferta para el cliente; tu trabajo es venderle esa idea con seguridad.
+
+═══ FLUJO COMERCIAL (USA ESTE ORDEN, NO IMPROVISES) ═══
+
+PASO 1 - Saludo y confirmación de identidad:
+"Buenas tardes, ¿hablo con [nombre]?" 
+Si dice sí, continúa. Si dice no, usa marcar_no_esta o marcar_equivocado.
+
+PASO 2 - Presentar propuesta DIRECTA (en UN solo turno):
+LLAMA proponer_convenio. Cuando te devuelva el plan, dile al cliente con FIRMEZA Y BREVEDAD:
+"[nombre], le hablo de ${despacho} por su cuenta de [saldo] pesos con ${acreedor}. Le propongo pagar quinientos pesos semanales por [X] semanas. Al final paga [saldo_total] con quince por ciento de reestructura. ¿Le funciona?"
+
+NO menciones días de atraso, NO digas "es la mejor opción", NO te extiendas. Directo al precio y plazo.
+
+Si el saldo es grande y pago semanal > $500:
+"[nombre], le hablo por su cuenta de [saldo] con ${acreedor}. Le propongo [pago_semanal] pesos semanales por 104 semanas, incluye quince por ciento de reestructura. ¿Le funciona?"
+
+PASO 3 - Manejo de la respuesta:
+
+Si ACEPTA ("sí", "ok", "está bien", "le entro") → ve INMEDIATO al PASO 4. NO confirmes otra vez. NO repitas el plan. NO digas "voy a registrar".
+
+Si DUDA o pone excusas leves ("no sé", "está fuerte"):
+INSISTE breve:
+"[nombre], quinientos pesos a la semana es accesible. ¿Empezamos esta semana?"
+
+Si propone PAGOS MENORES a $500/sem:
+RECHAZA breve:
+"No [nombre], el mínimo es quinientos. ¿Le acomoda?"
+
+Si propone PAGO ÚNICO bajo (abono suelto):
+RECHAZA y reproponer:
+"Para abonos sueltos no le conviene. Mejor el plan semanal. ¿Le funciona?"
+
+Si propone pagar TODO el saldo en fecha cercana:
+ACEPTA y usa registrar_promesa con esa fecha y el monto total. Esto es PROMESA, no convenio.
+
+Si rechaza DEFINITIVAMENTE:
+Última oportunidad breve:
+"[nombre], ¿realmente no hay manera de empezar con quinientos esta semana?"
+Si sigue negando:
+"Entiendo. Comuníquese al ${retorno} si cambia de opinión."
+Llama terminar_llamada con SIN_ACUERDO.
+
+PASO 4 - Cierre INMEDIATO cuando dice SÍ:
+EN EL MISMO TURNO:
+1. Llama registrar_convenio con primera_fecha="AUTO"
+2. Di: "Perfecto [nombre], su convenio quedó registrado. Le esperamos su primer pago de quinientos pesos el [día asignado]. Que tenga buen día."
+3. Llama terminar_llamada con CONVENIO_ACORDADO
+
+NO hagas "¿está de acuerdo?" otra vez. NO preguntes fecha. NO digas "voy a registrar". Solo registra, agradece y cierra. TODO EN UN SOLO TURNO.
+
+PASO 5 - Si cliente pide CAMBIAR fecha:
+Solo si dice "no, mejor el martes": pregunta "¿Qué día?"
+Cuando dé fecha, registra y cierra.
+
+═══ REGLAS ABSOLUTAS - NO LAS VIOLES ═══
+
+1. NUNCA aceptes pagos semanales por debajo de $500. Es el mínimo establecido.
+2. NUNCA aceptes promesas vagas tipo "veo, te aviso, mañana te llamo". Insiste en un compromiso concreto.
+3. NUNCA seas sumiso. Eres profesional pero firme. Tu propuesta es la mejor, defiéndela.
+4. NUNCA digas "está bien" a una mala oferta del cliente solo por cerrar la llamada. Prefiere SIN_ACUERDO antes que un mal convenio.
+5. NUNCA inventes números. SIEMPRE usa proponer_convenio para calcular. El sistema aplica las reglas (recargo 15%, mínimo $500/sem, máximo 104 semanas).
+6. NUNCA prometas descuentos, condonaciones ni quitas.
+7. NUNCA amenaces con buró, demanda o embargo. No es necesario y es contraproducente.
+8. Si contesta alguien que NO es el cliente, deja recado: "Hablo de ${despacho}, dígale que se comunique al ${retorno}, es importante". Usa marcar_no_esta.
+9. Si es número equivocado claro, despídete y usa marcar_equivocado.
+10. Si el cliente dice "ya pagué", agradece y di que se va a verificar. No discutas.
+11. Si se pone agresivo, despídete cortés y usa marcar_rechazo. No te enganches en pelea.
+
+═══ FORMA DE HABLAR - DINÁMICA DE COBRANZA REAL ═══
+
+- Frases MUY CORTAS, máximo 15 palabras. Cobranza es directa, no es plática.
+- Trata de "usted".
+- Montos en palabras claras: "quinientos pesos", "veintiocho mil pesos".
+- NO uses markdown, asteriscos, listas. Esto se convierte a voz.
+- Di nombres tal cual: "Credia" no "C R E D I A".
+- Usa el nombre del cliente máximo 1-2 veces por turno (no en cada frase).
+- NO seas pesado: si cliente confirmó algo, NO lo repitas todo otra vez ("entonces queda en pagar..."). Solo registra y cierra.
+- NO digas "voy a registrar su convenio ahora" antes de hacerlo. Hazlo y di el resultado.
+- NO uses dos turnos para confirmar lo mismo. Un turno = una acción + una pregunta concreta.
+
+REGLA DE ORO DE VELOCIDAD:
+Cliente dice "sí/ok/está bien/de acuerdo" al convenio → INMEDIATAMENTE llamas a registrar_convenio en el MISMO turno, y dices el cierre. NO preguntas "¿está de acuerdo?" otra vez. NO preguntas la fecha. SOLO registra y cierra.
+
+EJEMPLO DEL FLUJO IDEAL EN 3 TURNOS (NO MÁS):
+Turno 1:
+  Cliente: "Sí soy Juan"
+  Bot: [llama proponer_convenio] "Le hablo de Legaxi por su cuenta de veinticinco mil con Credia. Le propongo quinientos pesos semanales por cincuenta y ocho semanas, total veintiocho mil setecientos cincuenta con quince por ciento de reestructura. ¿Le funciona?"
+
+Turno 2:
+  Cliente: "Sí está bien"
+  Bot: [llama registrar_convenio AUTO] "Perfecto Juan, su convenio quedó registrado. Le esperamos su primer pago de quinientos pesos el viernes veintinueve de mayo. Que tenga buen día." [llama terminar_llamada]
+
+Eso es todo. 2 turnos + saludo = 3 intercambios. Si vas a más de 4 turnos, es que estás dando vueltas. CORRIGE.
+
+═══ TOOLS - CUÁNDO USARLAS ═══
+
+- proponer_convenio: ÚSALA AL INICIO en cuanto se confirme identidad. NO inventes cálculos.
+- registrar_convenio: APENAS cliente acepte el plan. Manda primera_fecha="AUTO". NO preguntes fecha.
+- registrar_promesa: SOLO si cliente promete pagar TODO el saldo en fecha concreta cercana.
+- marcar_no_esta: tercero que conoce al cliente, dejas recado.
+- marcar_equivocado: persona NO conoce al cliente.
+- marcar_rechazo: cliente agresivo o pide no llamar.
+- terminar_llamada: SIEMPRE al final con el resultado correcto.
+
+Recuerda: eres COBRADOR PROFESIONAL Y RÁPIDO. Cierra el convenio en 2 turnos. Habla CORTO. Defiende tu propuesta con seguridad.`;
+}
+
+// ═══ LLAMAR A CLAUDE PARA UN TURNO ═══
+async function consultarClaude(systemPrompt, historial) {
+    const t0 = Date.now();
+    try {
+        const resp = await claude.messages.create({
+            model: 'claude-haiku-4-5-20251001',
+            max_tokens: 300,
+            system: systemPrompt,
+            tools: CLAUDE_TOOLS,
+            messages: historial
+        });
+        const ms = Date.now() - t0;
+        log('  🧠 Claude respondió en ' + ms + 'ms (stop: ' + resp.stop_reason + ')');
+        return resp;
+    } catch(e) {
+        log('  ❌ Error Claude API: ' + e.message);
+        return null;
+    }
+}
+
+const reporteLote = {
+    activo: false,
+    loteId: null,
+    despacho: null,
+    inicioEn: null,
+    resultados: []
+};
+
+function registrarEnReporte(resultado) {
+    if (!reporteLote.activo) return;
+    reporteLote.resultados.push(resultado);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SERVIDOR AUDIOSOCKET (corazón del bot)
+// ═══════════════════════════════════════════════════════════════
+const audioServer = net.createServer(async (socket) => {
+    try {
+        const peer = socket.remoteAddress + ':' + socket.remotePort;
+        incLlamadas();
+        log('═════════════════════════════════════════');
+        log('NUEVA LLAMADA desde ' + peer + ' (activas: ' + llamadasActivas + '/' + MAX_CONCURRENTES + ')');
+        log('═════════════════════════════════════════');
+
+        const datosLlamada = tomarMasReciente();
+        if (datosLlamada) {
+            log('  📋 ' + datosLlamada.nombre + ' (' + datosLlamada.telefono + ') | saldo: $' + (datosLlamada.saldo || '?'));
+        } else {
+            log('  ⚠ Sin datos de cliente (cola vacía)');
+        }
+
+        let buffer = Buffer.alloc(0);
+        let uuid = null;
+        let escuchando = false;
+        let yaTerminado = false;
+        let turnoActual = 0;
+        let lastPartial = '';
+        let lastNewTextTime = 0;
+        let silenceFramesActual = 0;
+        let speechFrames = 0;
+        let timeoutEscucha = null;
+        let stallChecker = null;
+        let timeoutGlobal = null;
+        const llamadaInicio = Date.now();
+        const historial = [];  // mensajes para Claude: {role, content}
+        let resultadoFinal = null;
+        let promesaCapturada = null;
+        let convenioCapturado = null;
+        let convenioPropuesto = null;  // se guarda lo que devolvió proponer_convenio
+        let resumenFinal = '';
+
+        let rec = new vosk.Recognizer({ model: voskModel, sampleRate: SAMPLE_RATE });
+
+        const systemPrompt = construirSystemPrompt(datosLlamada || {});
+
+        // Timeout global de seguridad
+        timeoutGlobal = setTimeout(() => {
+            if (!yaTerminado) {
+                log('  ⏰ TIMEOUT GLOBAL (3min) - cerrando');
+                cerrarLlamada('TIMEOUT', 'Llamada excedió tiempo máximo');
+            }
+        }, TIEMPO_MAX_LLAMADA_MS);
+
+        async function reproducirAudio(pcm) {
+            const frames = Math.ceil(pcm.length / FRAME_SIZE);
+            const start = Date.now();
+            for (let i = 0; i < frames; i++) {
+                if (socket.destroyed) return false;
+                let f = pcm.slice(i*FRAME_SIZE, (i+1)*FRAME_SIZE);
+                if (f.length < FRAME_SIZE) { const p = Buffer.alloc(FRAME_SIZE); f.copy(p); f = p; }
+                try { socket.write(buildMsg(KIND_AUDIO, f)); } catch(_) { return false; }
+                const wait = Math.max(0, start + (i+1)*20 - Date.now());
+                await new Promise(r => setTimeout(r, wait));
+            }
+            return true;
+        }
+
+        async function cerrarLlamada(resultado, resumen) {
+            if (yaTerminado) return;
+            yaTerminado = true;
+            escuchando = false;
+            resultadoFinal = resultado;
+            resumenFinal = resumen || '';
+
+            if (timeoutEscucha) clearTimeout(timeoutEscucha);
+            if (stallChecker) clearInterval(stallChecker);
+            if (timeoutGlobal) clearTimeout(timeoutGlobal);
+
+            const duracion = Math.round((Date.now() - llamadaInicio) / 1000);
+
+            log('  ╔════════════════════════════════════════');
+            log('  ║ LLAMADA TERMINADA');
+            log('  ║ Resultado: ' + resultado);
+            log('  ║ Turnos: ' + turnoActual);
+            log('  ║ Duración: ' + duracion + 's');
+            log('  ║ Resumen: ' + resumen);
+            if (promesaCapturada) {
+                log('  ║ PROMESA: $' + promesaCapturada.monto + ' el ' + promesaCapturada.fecha);
+            }
+            if (convenioCapturado) {
+                log('  ║ CONVENIO: ' + convenioCapturado.semanas + ' semanas x $' + convenioCapturado.pago_semanal + ' = $' + convenioCapturado.saldo_total);
+            }
+            log('  ╚════════════════════════════════════════');
+
+            // Reportar a Fantasma
+            if (datosLlamada) {
+                const reporte = {
+                    telefono: datosLlamada.telefono,
+                    cliente: datosLlamada.nombre,
+                    bot: true,
+                    version: 'v10',
+                    categoria: resultado,
+                    duration: duracion,
+                    turnos: turnoActual,
+                    resumen: resumen,
+                    historial_conversacion: historial.map(m => ({
+                        role: m.role,
+                        texto: typeof m.content === 'string' ? m.content :
+                               (m.content.find(c => c.type === 'text')?.text || '')
+                    })),
+                    promesa: promesaCapturada,
+                    convenio: convenioCapturado,
+                    fecha: new Date().toISOString()
+                };
+                reportarResultado(reporte);
+                registrarEnReporte({
+                    telefono: datosLlamada.telefono,
+                    nombre: datosLlamada.nombre || '',
+                    saldo: datosLlamada.saldo || '',
+                    categoria: resultado,
+                    duracion,
+                    turnos: turnoActual,
+                    promesa: promesaCapturada,
+                    convenio: convenioCapturado,
+                    fecha: new Date().toISOString()
+                });
+            }
+
+            // Cerrar socket limpio
+            setTimeout(() => {
+                try {
+                    socket.write(buildMsg(KIND_HANGUP, Buffer.alloc(0)));
+                    setTimeout(() => { try { socket.end(); } catch(_){} }, 200);
+                } catch(_) {}
+            }, 400);
+        }
+
+        async function ejecutarTool(toolUse) {
+            const { name, input } = toolUse;
+            log('  🔧 Tool: ' + name + ' | input: ' + JSON.stringify(input).substring(0, 200));
+
+            switch(name) {
+                case 'registrar_promesa': {
+                    promesaCapturada = {
+                        fecha: input.fecha,
+                        monto: input.monto,
+                        observaciones: input.observaciones || ''
+                    };
+                    if (datosLlamada) {
+                        const r = await registrarPromesaEnFantasma({
+                            telefono: datosLlamada.telefono,
+                            nombre: datosLlamada.nombre,
+                            ...promesaCapturada
+                        });
+                        return { ok: r.ok, mensaje: r.ok ? 'Promesa registrada exitosamente' : 'Error: ' + r.error };
+                    }
+                    return { ok: true, mensaje: 'Promesa capturada (sin datos cliente para enviar a sheet)' };
+                }
+                case 'proponer_convenio': {
+                    // Solo CALCULA, no registra. Devuelve el plan a Claude para que lo proponga al cliente.
+                    if (!datosLlamada || !datosLlamada.saldo) {
+                        return { ok: false, mensaje: 'No hay saldo disponible para calcular convenio. Pregunta al cliente cuánto puede pagar a la semana.' };
+                    }
+                    const plan = calcularConvenio(datosLlamada.saldo);
+                    if (plan.error) {
+                        return { ok: false, mensaje: 'Error calculando: ' + plan.error };
+                    }
+                    convenioPropuesto = plan;
+                    log('  📋 Convenio propuesto: ' + plan.semanas + ' sem x $' + plan.pago_semanal + 
+                        ' (saldo ' + plan.saldo_original + ' → total ' + plan.saldo_total_convenio + 
+                        (plan.recargo_aplicado ? ' con recargo 15%' : ' sin recargo') + ')');
+                    return {
+                        ok: true,
+                        mensaje: 'Plan calculado. Propónselo al cliente con voz natural.',
+                        plan: {
+                            saldo_original: plan.saldo_original,
+                            saldo_total_convenio: plan.saldo_total_convenio,
+                            recargo_aplicado: plan.recargo_aplicado,
+                            recargo_monto: plan.recargo_monto,
+                            semanas: plan.semanas,
+                            pago_semanal: plan.pago_semanal,
+                            tope_aplicado: plan.tope_aplicado
+                        }
+                    };
+                }
+                case 'registrar_convenio': {
+                    // v10.4: si Claude manda "AUTO" o vacío, el sistema calcula viernes/lunes próximo
+                    let fechaUsar = input.primera_fecha;
+                    let diaLegible = '';
+                    if (!fechaUsar || fechaUsar === 'AUTO' || fechaUsar === 'auto' || fechaUsar.length < 8) {
+                        const auto = calcularFechaProximoPago();
+                        fechaUsar = auto.iso;
+                        diaLegible = auto.diaNombre;
+                        log('  📅 Fecha automática asignada: ' + auto.legible + ' (' + auto.iso + ')');
+                    } else {
+                        // Si Claude mandó fecha específica, intentar obtener día de la semana
+                        try {
+                            const d = new Date(fechaUsar + 'T12:00:00');
+                            diaLegible = ['domingo','lunes','martes','miércoles','jueves','viernes','sábado'][d.getDay()];
+                        } catch(_) {}
+                    }
+                    
+                    convenioCapturado = {
+                        semanas: input.semanas,
+                        pago_semanal: input.pago_semanal,
+                        saldo_total: input.saldo_total,
+                        primera_fecha: fechaUsar,
+                        dia_primera_fecha: diaLegible,
+                        observaciones: input.observaciones || ''
+                    };
+                    if (datosLlamada) {
+                        const saldoOrig = parseFloat(datosLlamada.saldo) || 0;
+                        const r = await registrarConvenioEnFantasma({
+                            telefono: datosLlamada.telefono,
+                            nombre: datosLlamada.nombre,
+                            saldo_original: saldoOrig,
+                            saldo_total: input.saldo_total,
+                            semanas: input.semanas,
+                            pago_semanal: input.pago_semanal,
+                            recargo_aplicado: (input.saldo_total > saldoOrig),
+                            primera_fecha: fechaUsar,
+                            observaciones: input.observaciones || ''
+                        });
+                        return { 
+                            ok: r.ok, 
+                            mensaje: r.ok ? 'Convenio registrado exitosamente' : 'Error: ' + r.error,
+                            primera_fecha_asignada: fechaUsar,
+                            dia_primera_fecha: diaLegible
+                        };
+                    }
+                    return { ok: true, mensaje: 'Convenio capturado', primera_fecha_asignada: fechaUsar, dia_primera_fecha: diaLegible };
+                }
+                case 'marcar_equivocado':
+                    resultadoFinal = 'EQUIVOCADO';
+                    return { ok: true, mensaje: 'Marcado como número equivocado' };
+                case 'marcar_no_esta':
+                    resultadoFinal = 'NO_ESTA';
+                    return { ok: true, mensaje: 'Marcado: ' + (input.quien_contesto || 'tercero') };
+                case 'marcar_rechazo':
+                    resultadoFinal = 'RECHAZO';
+                    return { ok: true, mensaje: 'Rechazo registrado' };
+                case 'terminar_llamada':
+                    // v10.7: si Claude se cortó por max_tokens y llama terminar_llamada sin
+                    // haber dicho el cierre, reproducir un cierre de emergencia para no colgar mudo
+                    resultadoFinal = input.resultado || resultadoFinal || 'TERMINADO';
+                    resumenFinal = input.resumen || resumenFinal || '';
+                    
+                    // Detectar si hubo cierre hablado en este turno
+                    // (revisamos el historial: el último assistant message debe tener texto significativo)
+                    const ultimoAssistant = [...historial].reverse().find(m => m.role === 'assistant');
+                    let huboTextoEnCierre = false;
+                    if (ultimoAssistant) {
+                        const txt = typeof ultimoAssistant.content === 'string' 
+                            ? ultimoAssistant.content 
+                            : (Array.isArray(ultimoAssistant.content) 
+                                ? ultimoAssistant.content.filter(b => b.type === 'text').map(b => b.text).join(' ')
+                                : '');
+                        // Considerar "cierre" si dijo más de 30 caracteres en su último turno
+                        if (txt && txt.trim().length > 30) huboTextoEnCierre = true;
+                    }
+                    
+                    if (!huboTextoEnCierre) {
+                        // Generar cierre de emergencia según el resultado
+                        let cierreEmergencia;
+                        const nombre = datosLlamada && datosLlamada.nombre ? nombreCorto(datosLlamada.nombre) : '';
+                        const saludoNombre = nombre ? nombre + ', ' : '';
+                        
+                        if (resultadoFinal === 'CONVENIO_ACORDADO' && convenioCapturado) {
+                            const dia = convenioCapturado.dia_primera_fecha || 'viernes';
+                            cierreEmergencia = `Perfecto ${saludoNombre}su convenio quedó registrado. Le esperamos su primer pago de quinientos pesos el ${dia}. Que tenga buen día.`;
+                        } else if (resultadoFinal === 'PROMESA_OBTENIDA') {
+                            cierreEmergencia = `Perfecto ${saludoNombre}su compromiso quedó registrado. Que tenga buen día.`;
+                        } else if (resultadoFinal === 'SIN_ACUERDO') {
+                            cierreEmergencia = `Entiendo ${saludoNombre}. Comuníquese al ${(datosLlamada && datosLlamada.telefono_retorno) || RETORNO_DEFAULT} cuando pueda regularizar. Que tenga buen día.`;
+                        } else if (resultadoFinal === 'EQUIVOCADO') {
+                            cierreEmergencia = `Disculpe la molestia. Que tenga buen día.`;
+                        } else if (resultadoFinal === 'NO_ESTA') {
+                            cierreEmergencia = `Le agradezco. Por favor dele el recado. Que tenga buen día.`;
+                        } else if (resultadoFinal === 'RECHAZO') {
+                            cierreEmergencia = `Entiendo. Que tenga buen día.`;
+                        } else {
+                            cierreEmergencia = `Le agradezco. Que tenga buen día.`;
+                        }
+                        
+                        log('  ⚠ Claude no dijo cierre (max_tokens?). Reproduciendo cierre de emergencia.');
+                        try {
+                            const pcm = await generarAudioFresco(cierreEmergencia);
+                            await reproducirAudio(pcm);
+                        } catch(e) {
+                            log('  ❌ Error en cierre emergencia: ' + e.message);
+                        }
+                    }
+                    
+                    return { ok: true, mensaje: 'Listo para cerrar', terminar: true };
+                default:
+                    return { ok: false, mensaje: 'Tool desconocida' };
+            }
+        }
+
+        async function turnoConversacional(textoCliente) {
+            if (yaTerminado) return;
+            turnoActual++;
+
+            if (turnoActual > MAX_TURNOS) {
+                log('  ⚠ MAX_TURNOS alcanzado - forzando cierre');
+                const cierre = 'Le agradezco su tiempo. Que tenga buen día.';
+                try {
+                    const pcm = await generarAudioFresco(cierre);
+                    await reproducirAudio(pcm);
+                } catch(e) { log('  ⚠ Error cierre forzado: ' + e.message); }
+                return cerrarLlamada('MAX_TURNOS', 'Conversación excedió turnos máximos');
+            }
+
+            log('  ─── TURNO ' + turnoActual + ' ───');
+            log('  👤 Cliente dijo: "' + textoCliente + '"');
+
+            // Agregar al historial
+            historial.push({ role: 'user', content: textoCliente || '(silencio)' });
+
+            // v10.4: Solo metemos puente si Claude tarda más de 800ms
+            // Esto evita pausas innecesarias en respuestas rápidas (sí/no)
+            const claudeStart = Date.now();
+            let puenteIniciado = false;
+            const puenteTimer = setTimeout(async () => {
+                if (yaTerminado) return;
+                puenteIniciado = true;
+                try {
+                    const pcm = await obtenerPuenteRandom();
+                    if (!yaTerminado) await reproducirAudio(pcm);
+                } catch(_) {}
+            }, 800);
+            
+            // Llamar a Claude
+            const respClaude = await consultarClaude(systemPrompt, historial);
+            const claudeMs = Date.now() - claudeStart;
+            
+            // Si Claude respondió rápido (<800ms), cancela el puente antes de que se reproduzca
+            if (!puenteIniciado) {
+                clearTimeout(puenteTimer);
+            }
+
+            if (!respClaude) {
+                log('  ⚠ Claude no respondió - cerrando llamada');
+                try {
+                    const pcm = await generarAudioFresco('Disculpe, tuvimos un problema técnico. Por favor llámenos al ' + RETORNO_DEFAULT.replace(/\s/g,' ') + '. Gracias.');
+                    await reproducirAudio(pcm);
+                } catch(e){}
+                return cerrarLlamada('ERROR_CLAUDE', 'Falla en Claude API');
+            }
+
+            // Procesar respuesta de Claude
+            const textoRespuesta = respClaude.content
+                .filter(b => b.type === 'text')
+                .map(b => b.text)
+                .join(' ')
+                .trim();
+
+            const toolUses = respClaude.content.filter(b => b.type === 'tool_use');
+
+            // Si hay texto, reproducir
+            if (textoRespuesta) {
+                log('  🤖 Bot dice: "' + textoRespuesta + '"');
+                try {
+                    const pcm = await generarAudioFresco(textoRespuesta);
+                    const ok = await reproducirAudio(pcm);
+                    if (!ok) {
+                        log('  ⚠ Cliente colgó durante respuesta');
+                        return cerrarLlamada('COLGO', 'Cliente colgó');
+                    }
+                } catch(e) {
+                    log('  ❌ Error generando audio respuesta: ' + e.message);
+                }
+            }
+
+            // Procesar tools
+            let debeTerminar = false;
+            let huboTools = false;
+            if (toolUses.length > 0) {
+                huboTools = true;
+                // Agregar el assistant message completo al historial
+                historial.push({ role: 'assistant', content: respClaude.content });
+
+                const toolResults = [];
+                for (const tu of toolUses) {
+                    const result = await ejecutarTool(tu);
+                    if (result.terminar) debeTerminar = true;
+                    toolResults.push({
+                        type: 'tool_result',
+                        tool_use_id: tu.id,
+                        content: JSON.stringify(result)
+                    });
+                }
+                historial.push({ role: 'user', content: toolResults });
+
+                // Si la tool fue terminar_llamada o marcar_equivocado, cerrar ya
+                if (debeTerminar || resultadoFinal === 'EQUIVOCADO' || resultadoFinal === 'RECHAZO') {
+                    return cerrarLlamada(resultadoFinal || 'TERMINADO', resumenFinal);
+                }
+            } else {
+                // Solo texto, agregar al historial
+                historial.push({ role: 'assistant', content: textoRespuesta });
+            }
+
+            if (yaTerminado) return;
+
+            // v10.6 FIX: si Claude llamó tool SIN decir texto al cliente, NO abrir escucha.
+            // Llamar a Claude inmediatamente otra vez para que continúe en el mismo turno.
+            // Esto evita 6+ segundos de silencio incómodo después de cada tool_use.
+            if (huboTools && !textoRespuesta && turnoActual <= MAX_TURNOS) {
+                log('  ⚡ Tool sin texto → continuando inmediatamente sin esperar al cliente');
+                // Re-llamar a Claude con el historial actualizado (que ya tiene el tool_result)
+                const respClaude2 = await consultarClaude(systemPrompt, historial);
+                if (!respClaude2) {
+                    log('  ⚠ Claude no respondió en continuación');
+                    return reiniciarEscucha();
+                }
+                
+                const texto2 = respClaude2.content
+                    .filter(b => b.type === 'text')
+                    .map(b => b.text)
+                    .join(' ')
+                    .trim();
+                const tools2 = respClaude2.content.filter(b => b.type === 'tool_use');
+                
+                if (texto2) {
+                    log('  🤖 Bot dice: "' + texto2 + '"');
+                    try {
+                        const pcm = await generarAudioFresco(texto2);
+                        const ok = await reproducirAudio(pcm);
+                        if (!ok) return cerrarLlamada('COLGO', 'Cliente colgó');
+                    } catch(e) { log('  ❌ Error audio cont: ' + e.message); }
+                }
+                
+                if (tools2.length > 0) {
+                    historial.push({ role: 'assistant', content: respClaude2.content });
+                    const toolResults2 = [];
+                    let terminar2 = false;
+                    for (const tu of tools2) {
+                        const result = await ejecutarTool(tu);
+                        if (result.terminar) terminar2 = true;
+                        toolResults2.push({
+                            type: 'tool_result',
+                            tool_use_id: tu.id,
+                            content: JSON.stringify(result)
+                        });
+                    }
+                    historial.push({ role: 'user', content: toolResults2 });
+                    if (terminar2 || resultadoFinal === 'EQUIVOCADO' || resultadoFinal === 'RECHAZO') {
+                        return cerrarLlamada(resultadoFinal || 'TERMINADO', resumenFinal);
+                    }
+                } else if (texto2) {
+                    historial.push({ role: 'assistant', content: texto2 });
+                }
+                
+                if (yaTerminado) return;
+            }
+            
+            reiniciarEscucha();
+        }
+
+        function reiniciarEscucha() {
+            if (yaTerminado) return;
+            try { rec.free(); } catch(e){}
+            rec = new vosk.Recognizer({ model: voskModel, sampleRate: SAMPLE_RATE });
+            lastPartial = '';
+            silenceFramesActual = 0;
+            speechFrames = 0;
+            lastNewTextTime = Date.now();
+            escuchando = true;
+            if (timeoutEscucha) clearTimeout(timeoutEscucha);
+            timeoutEscucha = setTimeout(() => {
+                if (!escuchando || yaTerminado) return;
+                log('  ⏰ Timeout escucha turno ' + turnoActual);
+                escuchando = false;
+                turnoConversacional('').catch(e => log('  ❌ Error turno: ' + e.message));
+            }, MAX_LISTEN_MS);
+        }
+
+        function procesarAudioCliente(payload) {
+            if (yaTerminado || !escuchando) return;
+            try {
+                const rms = calcularRMS(payload);
+                if (rms < SILENCE_THRESHOLD) {
+                    silenceFramesActual++;
+                } else {
+                    silenceFramesActual = 0;
+                    speechFrames++;
+                }
+                const isFinal = rec.acceptWaveform(payload);
+                if (isFinal) {
+                    const r = rec.result();
+                    if (r && r.text && r.text !== lastPartial) {
+                        lastPartial = r.text;
+                        lastNewTextTime = Date.now();
+                        log('  ✅ Vosk: "' + r.text + '"');
+                    }
+                } else {
+                    const pr = rec.partialResult();
+                    if (pr && pr.partial && pr.partial !== lastPartial && pr.partial.length > 0) {
+                        lastPartial = pr.partial;
+                        lastNewTextTime = Date.now();
+                    }
+                }
+                const silenceMs = silenceFramesActual * 20;
+                const speechMs = speechFrames * 20;
+                if (silenceMs >= SILENCE_MS && speechMs >= MIN_SPEECH_MS) {
+                    escuchando = false;
+                    const textoFinal = rec.finalResult();
+                    const usable = (textoFinal && textoFinal.text) ? textoFinal.text : lastPartial;
+                    turnoConversacional(usable).catch(e => log('  ❌ Error turno: ' + e.message));
+                }
+            } catch(e) {
+                log('  ❌ Error procesando audio: ' + e.message);
+            }
+        }
+
+        socket.on('data', async (chunk) => {
+            try {
+                buffer = Buffer.concat([buffer, chunk]);
+                while (buffer.length >= 3) {
+                    const kind = buffer.readUInt8(0);
+                    const len = buffer.readUInt16BE(1);
+                    if (buffer.length < 3 + len) break;
+                    const payload = buffer.slice(3, 3 + len);
+                    buffer = buffer.slice(3 + len);
+
+                    if (kind === KIND_UUID) {
+                        uuid = payload.toString('hex');
+                        log('  UUID: ' + uuid.substring(0, 8));
+
+                        setTimeout(async () => {
+                            try {
+                                if (socket.destroyed) return;
+                                const saludo = construirSaludo(datosLlamada || {});
+                                log('  🤖 Saludo: "' + saludo + '"');
+                                const pcm = await obtenerAudioCacheado(saludo, 'sal', SALUDOS_DIR);
+                                const ok = await reproducirAudio(pcm);
+                                if (!ok) {
+                                    log('  ⚠ Cliente colgó durante saludo');
+                                    return cerrarLlamada('COLGO_INICIO', 'Cliente colgó en saludo');
+                                }
+                                // Iniciar escucha
+                                historial.push({ role: 'assistant', content: saludo });
+                                log('  Activando escucha STT (turno 1)...');
+                                reiniciarEscucha();
+                                stallChecker = setInterval(() => {
+                                    if (!escuchando || yaTerminado) return;
+                                    const stalledMs = Date.now() - lastNewTextTime;
+                                    const speechMs = speechFrames * 20;
+                                    if (stalledMs >= STALL_MS && lastPartial.length > 0 && speechMs >= MIN_SPEECH_MS) {
+                                        log('  STALL ' + stalledMs + 'ms');
+                                        escuchando = false;
+                                        const textoFinal = rec.finalResult();
+                                        const usable = (textoFinal && textoFinal.text) ? textoFinal.text : lastPartial;
+                                        turnoConversacional(usable).catch(e => log('  ❌ Error turno stall: ' + e.message));
+                                    }
+                                }, 250);
+                            } catch(e) {
+                                log('  ❌ ERROR en saludo: ' + e.message);
+                                try { socket.end(); } catch(_) {}
+                            }
+                        }, 500);
+                    }
+                    else if (kind === KIND_AUDIO && escuchando) procesarAudioCliente(payload);
+                    else if (kind === KIND_HANGUP) {
+                        log('  HANGUP cliente');
+                        if (!yaTerminado) cerrarLlamada('COLGO', 'Cliente colgó');
+                    }
+                }
+            } catch(e) {
+                log('  ❌ Error data: ' + e.message);
+            }
+        });
+
+        socket.on('close', () => {
+            try { rec.free(); } catch(e){}
+            if (stallChecker) clearInterval(stallChecker);
+            if (timeoutEscucha) clearTimeout(timeoutEscucha);
+            if (timeoutGlobal) clearTimeout(timeoutGlobal);
+            if (!yaTerminado) cerrarLlamada('SOCKET_CLOSE', 'Socket cerrado sin terminar limpio');
+            decLlamadas();
+            log('CONEXION CERRADA (activas: ' + llamadasActivas + '/' + MAX_CONCURRENTES + ')\n');
+        });
+        socket.on('error', e => log('  ⚠ Socket err: ' + e.message));
+    } catch(globalErr) {
+        log('  💥 ERROR GLOBAL en conexión: ' + globalErr.message);
+        decLlamadas();
+        try { socket.end(); } catch(_) {}
+    }
 });
 
-/**
- * POST /api/verificar-lote
- * Verifica multiples numeros. Delay de 2s entre cada uno para no disparar alarmas.
- * Body: { "telefonos": ["5512345678", "5598765432", ...] }
- * Respuesta: { "success": true, "resultados": [{ "telefono": "...", "existe": true/false }, ...] }
- * Max 50 numeros por llamada para evitar timeout.
- */
-app.post('/api/verificar-lote', async (req, res) => {
-  try {
-    const tokenEsperado = process.env.BOT_API_TOKEN;
-    if (tokenEsperado) {
-      const authHeader = req.headers.authorization || '';
-      const tokenRecibido = authHeader.replace(/^Bearer\s+/i, '').trim();
-      if (tokenRecibido !== tokenEsperado) {
-        return res.status(401).json({ success: false, error: 'Token invalido' });
-      }
-    }
-
-    const { telefonos } = req.body;
-    if (!telefonos || !Array.isArray(telefonos) || telefonos.length === 0) {
-      return res.status(400).json({ success: false, error: 'telefonos (array) requerido' });
-    }
-
-    if (telefonos.length > 50) {
-      return res.status(400).json({ success: false, error: 'Maximo 50 numeros por llamada' });
-    }
-
-    if (!whatsappService.isConnected()) {
-      return res.status(503).json({ success: false, error: 'WhatsApp no conectado' });
-    }
-
-    const resultados = [];
-    for (let i = 0; i < telefonos.length; i++) {
-      const tel = telefonos[i];
-      try {
-        const jid = whatsappService.formatearNumero(tel);
-        const numero = jid.split('@')[0];
-        const [result] = await whatsappService.sock.onWhatsApp(numero);
-        resultados.push({ telefono: tel, existe: !!(result && result.exists) });
-      } catch (e) {
-        resultados.push({ telefono: tel, existe: false, error: e.message });
-      }
-
-      // Delay 2s entre verificaciones para no disparar alarmas
-      if (i < telefonos.length - 1) {
-        await new Promise(r => setTimeout(r, 2000));
-      }
-    }
-
-    const conWhatsApp = resultados.filter(r => r.existe).length;
-    const sinWhatsApp = resultados.filter(r => !r.existe).length;
-    console.log(`[API] Verificacion lote: ${conWhatsApp} con WA, ${sinWhatsApp} sin WA (de ${telefonos.length})`);
-
-    res.json({ success: true, resultados, conWhatsApp, sinWhatsApp, total: telefonos.length });
-
-  } catch (error) {
-    console.error('[API] Error verificar-lote:', error.message);
-    res.status(500).json({ success: false, error: error.message });
-  }
+audioServer.listen(AUDIOSOCKET_PORT, '0.0.0.0', async () => {
+    console.log('═════════════════════════════════════════');
+    console.log('  LeGaXi Voice Bot v10.8 - Claude Agent');
+    console.log('═════════════════════════════════════════');
+    console.log('  AudioSocket TCP: 0.0.0.0:' + AUDIOSOCKET_PORT);
+    console.log('  HTTP API:        0.0.0.0:' + HTTP_API_PORT);
+    console.log('  Voz TTS:         ' + TTS_VOICE);
+    console.log('  Despacho:        ' + DESPACHO_DEFAULT);
+    console.log('  Modelo IA:       claude-haiku-4-5');
+    console.log('  Max turnos:      ' + MAX_TURNOS);
+    console.log('  Max concurrentes:' + MAX_CONCURRENTES + ' (configurable con MAX_CONCURRENTES en .env)');
+    console.log('  Fantasma:        ' + FANTASMA_URL);
+    console.log('  Promesas:        Fantasma/Postgres ✓');
+    console.log('═════════════════════════════════════════\n');
+    await precalentarPuentes();
 });
 
-// ═══════════════════════════════════════════════════════════
-// HEALTH CHECK
-// ═══════════════════════════════════════════════════════════
+audioServer.on('error', e => log('💥 audioServer error: ' + e.message));
 
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    whatsapp: whatsappService.isConnected(),
-    chatbot: chatbot.activo,
-    envioMasivo: envioMasivoService.getProgreso(),
-    timestamp: new Date().toISOString()
-  });
+// ═══════════════════════════════════════════════════════════════
+// HTTP API
+// ═══════════════════════════════════════════════════════════════
+const httpServer = http.createServer(async (req, res) => {
+    try {
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+        if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
+
+        if (req.url === '/health' || req.url === '/api/status') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                ok: true,
+                version: '10.8',
+                modelo_ia: 'claude-haiku-4-5',
+                voz: TTS_VOICE,
+                llamadasEnCola: colaFIFO.length,
+                llamadasPorTel: llamadasPorTelefono.size,
+                llamadasActivas: getLlamadasActivas(),
+                maxConcurrentes: MAX_CONCURRENTES,
+                slotsLibres: Math.max(0, MAX_CONCURRENTES - getLlamadasActivas()),
+                saturado: getLlamadasActivas() >= MAX_CONCURRENTES,
+                loteActivo: reporteLote.activo,
+                loteResultados: reporteLote.resultados.length,
+                ttsEnVuelo,
+                ttsEnEspera: ttsCola.length,
+                claude_ok: !!ANTHROPIC_API_KEY,
+                promesas_destino: 'fantasma_postgres',
+                uptime: Math.floor(process.uptime())
+            }));
+            return;
+        }
+
+        if (req.url === '/api/lote/iniciar' && req.method === 'POST') {
+            const auth = req.headers.authorization || '';
+            if (auth.replace(/^Bearer\s+/i, '') !== API_TOKEN_LOCAL) {
+                res.writeHead(401); res.end(JSON.stringify({error:'Token inválido'})); return;
+            }
+            let body = '';
+            req.on('data', c => body += c);
+            req.on('end', () => {
+                try {
+                    const { loteId, despacho } = JSON.parse(body);
+                    reporteLote.activo = true;
+                    reporteLote.loteId = loteId || ('lote_' + Date.now());
+                    reporteLote.despacho = despacho || DESPACHO_DEFAULT;
+                    reporteLote.inicioEn = new Date().toISOString();
+                    reporteLote.resultados = [];
+                    log('🚀 LOTE INICIADO: ' + reporteLote.loteId);
+                    res.writeHead(200, {'Content-Type':'application/json'});
+                    res.end(JSON.stringify({success:true, loteId: reporteLote.loteId}));
+                } catch(e) { res.writeHead(400); res.end(JSON.stringify({error:e.message})); }
+            });
+            return;
+        }
+
+        if (req.url === '/api/lote/cerrar' && req.method === 'POST') {
+            const auth = req.headers.authorization || '';
+            if (auth.replace(/^Bearer\s+/i, '') !== API_TOKEN_LOCAL) {
+                res.writeHead(401); res.end(JSON.stringify({error:'Token inválido'})); return;
+            }
+            const reporte = {
+                loteId: reporteLote.loteId,
+                despacho: reporteLote.despacho,
+                inicioEn: reporteLote.inicioEn,
+                cierreEn: new Date().toISOString(),
+                totalLlamadas: reporteLote.resultados.length,
+                promesasObtenidas: reporteLote.resultados.filter(r => r.promesa).length,
+                resultados: reporteLote.resultados
+            };
+            reporteLote.activo = false;
+            log('🏁 LOTE CERRADO: ' + reporte.totalLlamadas + ' llamadas, ' + reporte.promesasObtenidas + ' promesas');
+            res.writeHead(200, {'Content-Type':'application/json'});
+            res.end(JSON.stringify(reporte));
+            return;
+        }
+
+        if (req.url === '/api/capacidad' && req.method === 'GET') {
+            // v10.8: endpoint para que Fantasma consulte si puede mandar más llamadas
+            const activas = getLlamadasActivas();
+            const enCola = colaFIFO.length;
+            const slotsLibres = Math.max(0, MAX_CONCURRENTES - activas);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                ok: true,
+                max_concurrentes: MAX_CONCURRENTES,
+                activas: activas,
+                en_cola: enCola,
+                slots_libres: slotsLibres,
+                saturado: slotsLibres === 0
+            }));
+            return;
+        }
+
+        if (req.url === '/api/llamar-bot' && req.method === 'POST') {
+            const auth = req.headers.authorization || '';
+            if (auth.replace(/^Bearer\s+/i, '') !== API_TOKEN_LOCAL) {
+                res.writeHead(401); res.end(JSON.stringify({error:'Token inválido'})); return;
+            }
+            
+            // v10.8: rechazar si está saturado
+            const activas = getLlamadasActivas();
+            const enCola = colaFIFO.length;
+            const totalPendiente = activas + enCola;
+            if (totalPendiente >= MAX_CONCURRENTES) {
+                log('🚦 RECHAZADA por saturación (activas: ' + activas + ', cola: ' + enCola + ' / max: ' + MAX_CONCURRENTES + ')');
+                res.writeHead(429, {'Content-Type':'application/json'});
+                res.end(JSON.stringify({
+                    success: false,
+                    error: 'Bot saturado',
+                    saturado: true,
+                    activas: activas,
+                    en_cola: enCola,
+                    max_concurrentes: MAX_CONCURRENTES,
+                    reintentar_en_segundos: 30
+                }));
+                return;
+            }
+            
+            let body = '';
+            req.on('data', c => body += c);
+            req.on('end', () => {
+                try {
+                    const datos = JSON.parse(body);
+                    if (!datos.telefono) { res.writeHead(400); res.end(JSON.stringify({error:'telefono requerido'})); return; }
+                    let tel = String(datos.telefono).replace(/\D/g, '');
+                    if (tel.length > 10) tel = tel.slice(-10);
+
+                    const llamadaPrevia = ultimasLlamadasPorTel.get(tel);
+                    const ahora = Date.now();
+                    if (llamadaPrevia && (ahora - llamadaPrevia) < 90000) {
+                        const segs = Math.round((ahora - llamadaPrevia)/1000);
+                        log('⚠ ' + tel + ' ya fue llamado hace ' + segs + 's - puede ser duplicado');
+                    }
+                    ultimasLlamadasPorTel.set(tel, ahora);
+
+                    registrarLlamada({
+                        telefono: tel,
+                        nombre: datos.nombre || null,
+                        saldo: datos.saldo || null,
+                        dias_atraso: datos.dias_atraso || datos.diasAtraso || null,
+                        despacho: datos.despacho || null,
+                        telefono_retorno: datos.telefono_retorno || null,
+                        acreedor: datos.acreedor || null
+                    });
+
+                    log('📤 Originando: ' + tel + ' | ' + (datos.nombre || 's/n') + ' | $' + (datos.saldo || '?') + ' (activas: ' + getLlamadasActivas() + '/' + MAX_CONCURRENTES + ')');
+
+                    // Pre-generar saludo
+                    obtenerAudioCacheado(construirSaludo({nombre: datos.nombre, despacho: datos.despacho}), 'sal', SALUDOS_DIR)
+                        .catch(e => log('  ⚠ Error pre-gen saludo: ' + e.message));
+
+                    const cmd = 'sudo asterisk -rx "channel originate SIP/zadarma/' + tel + ' extension s@cobranza-bot"';
+                    exec(cmd, { timeout: 10000 }, (err) => {
+                        if (err) {
+                            log('  ❌ Error originate: ' + err.message);
+                            res.writeHead(500); res.end(JSON.stringify({success:false, error:err.message})); return;
+                        }
+                        res.writeHead(200, {'Content-Type':'application/json'});
+                        res.end(JSON.stringify({
+                            success:true, 
+                            telefono:tel,
+                            activas: getLlamadasActivas(),
+                            max_concurrentes: MAX_CONCURRENTES
+                        }));
+                    });
+                } catch(e) { res.writeHead(400); res.end(JSON.stringify({error:e.message})); }
+            });
+            return;
+        }
+
+        res.writeHead(404); res.end('Not found');
+    } catch(e) {
+        log('💥 Error HTTP: ' + e.message);
+        try { res.writeHead(500); res.end(JSON.stringify({error:e.message})); } catch(_) {}
+    }
 });
 
-app.get('/ping', (req, res) => res.send('pong'));
-
-// ═══════════════════════════════════════════════════════════
-// INTERFAZ WEB — PANEL DE CONTROL
-// ═══════════════════════════════════════════════════════════
-
-app.get('/', (req, res) => {
-  res.send(getPanelHTML());
+httpServer.listen(HTTP_API_PORT, '0.0.0.0', () => {
+    console.log('HTTP API en 0.0.0.0:' + HTTP_API_PORT);
 });
 
-// ═══════════════════════════════════════════════════════════
-// INICIAR SERVIDOR
-// ═══════════════════════════════════════════════════════════
+httpServer.on('error', e => log('💥 httpServer error: ' + e.message));
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log('\n═══════════════════════════════════════════════════════════');
-  console.log('🚀 CELEXPRESS WHATSAPP + CHATBOT + ENVÍO MASIVO');
-  console.log('   LMV CREDIA SA DE CV');
-  console.log('═══════════════════════════════════════════════════════════');
-  console.log(`📡 Servidor: http://localhost:${PORT}`);
-  console.log('🤖 ChatBot: Esperando conexión WhatsApp...');
-  console.log('📤 Envío Masivo: Listo (anti-baneo activado)');
-  console.log('👥 Gestores: Lic. Carlos, Lic. Gustavo');
-  console.log('═══════════════════════════════════════════════════════════\n');
+process.on('uncaughtException', (err) => {
+    log('💥💥 EXCEPCIÓN NO MANEJADA: ' + err.message);
+    log(err.stack);
 });
 
-process.on('SIGINT', async () => {
-  console.log('\n🛑 Cerrando servidor...');
-  envioMasivoService.cancelar();
-  await whatsappService.cerrarSesion();
-  process.exit(0);
+process.on('unhandledRejection', (reason, p) => {
+    log('💥💥 PROMESA RECHAZADA: ' + (reason && reason.message ? reason.message : reason));
 });
 
-// ═══════════════════════════════════════════════════════════
-// HTML DEL PANEL
-// ═══════════════════════════════════════════════════════════
-
-function getPanelHTML() {
-  return `<!DOCTYPE html>
-<html lang="es">
-<head>
-  <title>CelExpress - Panel de Control</title>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <style>
-    :root {
-      --bg: #0B1120;
-      --bg2: #111827;
-      --card: #1A2332;
-      --border: #2A3A4E;
-      --text: #E2E8F0;
-      --muted: #8896A6;
-      --accent: #3B82F6;
-      --green: #10B981;
-      --green-bg: rgba(16,185,129,0.12);
-      --red: #EF4444;
-      --red-bg: rgba(239,68,68,0.12);
-      --yellow: #F59E0B;
-      --yellow-bg: rgba(245,158,11,0.12);
-      --purple: #8B5CF6;
-    }
-    * { margin:0; padding:0; box-sizing:border-box; }
-    body { font-family:'DM Sans',sans-serif; background:var(--bg); color:var(--text); min-height:100vh; }
-    
-    .header { background:var(--bg2); border-bottom:1px solid var(--border); padding:16px 24px; display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:10; }
-    .header h1 { font-size:1.1rem; font-weight:700; display:flex; align-items:center; gap:10px; }
-    .header h1 span { color:var(--accent); }
-    .conn-badge { padding:6px 14px; border-radius:20px; font-size:0.78rem; font-weight:600; }
-    .conn-badge.on { background:var(--green-bg); color:var(--green); }
-    .conn-badge.off { background:var(--red-bg); color:var(--red); }
-    
-    .container { max-width:1200px; margin:0 auto; padding:20px; }
-    .grid { display:grid; gap:16px; }
-    .grid-2 { grid-template-columns:1fr 1fr; }
-    .grid-3 { grid-template-columns:1fr 1fr 1fr; }
-    .grid-4 { grid-template-columns:repeat(4,1fr); }
-    @media(max-width:900px) { .grid-2,.grid-3,.grid-4 { grid-template-columns:1fr; } }
-    
-    .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:20px; }
-    .card h2 { font-size:0.85rem; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:14px; display:flex; align-items:center; gap:8px; }
-    
-    .stat-card { text-align:center; }
-    .stat-card .num { font-size:2rem; font-weight:700; font-family:'JetBrains Mono',monospace; }
-    .stat-card .label { font-size:0.78rem; color:var(--muted); margin-top:4px; }
-    .num.green { color:var(--green); }
-    .num.yellow { color:var(--yellow); }
-    .num.red { color:var(--red); }
-    .num.blue { color:var(--accent); }
-    
-    .btn { padding:10px 18px; border:none; border-radius:8px; cursor:pointer; font-family:inherit; font-weight:600; font-size:0.82rem; transition:all 0.15s; display:inline-flex; align-items:center; gap:6px; }
-    .btn:hover { transform:translateY(-1px); filter:brightness(1.1); }
-    .btn:active { transform:translateY(0); }
-    .btn-primary { background:var(--accent); color:white; }
-    .btn-green { background:var(--green); color:white; }
-    .btn-red { background:var(--red); color:white; }
-    .btn-yellow { background:var(--yellow); color:#1a1a1a; }
-    .btn-outline { background:transparent; border:1px solid var(--border); color:var(--text); }
-    .btn:disabled { opacity:0.5; cursor:not-allowed; transform:none; }
-    .btn-sm { padding:6px 12px; font-size:0.75rem; }
-    
-    .progress-bar { width:100%; height:8px; background:var(--bg); border-radius:4px; overflow:hidden; margin:12px 0; }
-    .progress-fill { height:100%; background:linear-gradient(90deg,var(--accent),var(--green)); border-radius:4px; transition:width 0.5s ease; }
-    
-    textarea, input[type=text], input[type=number], select {
-      width:100%; padding:10px 14px; background:var(--bg); border:1px solid var(--border);
-      border-radius:8px; color:var(--text); font-family:inherit; font-size:0.85rem; resize:vertical;
-    }
-    textarea:focus, input:focus, select:focus { outline:none; border-color:var(--accent); }
-    label { font-size:0.8rem; font-weight:500; color:var(--muted); margin-bottom:6px; display:block; }
-    
-    .file-drop { border:2px dashed var(--border); border-radius:12px; padding:24px; text-align:center; cursor:pointer; transition:all 0.2s; }
-    .file-drop:hover { border-color:var(--accent); background:rgba(59,130,246,0.05); }
-    .file-drop.active { border-color:var(--green); background:rgba(16,185,129,0.05); }
-    .file-drop p { color:var(--muted); font-size:0.82rem; margin-top:6px; }
-    
-    .log-panel { background:var(--bg); border-radius:8px; padding:12px; max-height:280px; overflow-y:auto; font-family:'JetBrains Mono',monospace; font-size:0.73rem; }
-    .log-line { padding:5px 0; border-bottom:1px solid rgba(255,255,255,0.04); display:flex; gap:8px; align-items:flex-start; }
-    .log-time { color:var(--muted); min-width:55px; flex-shrink:0; }
-    .log-ok { color:var(--green); }
-    .log-err { color:var(--red); }
-    .log-info { color:var(--accent); }
-    .log-tag { display:inline-block; padding:1px 6px; border-radius:3px; font-size:0.65rem; font-weight:600; margin-right:4px; }
-    .log-tag.ok { background:var(--green-bg); color:var(--green); }
-    .log-tag.err { background:var(--red-bg); color:var(--red); }
-    .log-tag.in { background:rgba(59,130,246,0.15); color:var(--accent); }
-    .log-tag.out { background:rgba(139,92,246,0.15); color:var(--purple); }
-    
-    .tag { display:inline-block; padding:3px 8px; border-radius:4px; font-size:0.7rem; font-weight:600; }
-    .tag-ok { background:var(--green-bg); color:var(--green); }
-    .tag-err { background:var(--red-bg); color:var(--red); }
-    .tag-wait { background:var(--yellow-bg); color:var(--yellow); }
-    .tag-info { background:rgba(59,130,246,0.12); color:var(--accent); }
-    
-    .controls { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
-    .gestor-row { display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background:var(--bg); border-radius:8px; margin-bottom:6px; }
-    .vars-help { background:var(--bg); border-radius:8px; padding:10px 14px; font-size:0.78rem; color:var(--muted); margin-top:8px; }
-    .vars-help code { background:var(--card); padding:2px 6px; border-radius:4px; color:var(--accent); font-family:'JetBrains Mono',monospace; }
-    .hidden { display:none !important; }
-    #qrArea img { max-width:220px; border-radius:8px; margin:12px auto; display:block; }
-    
-    .preview-table { width:100%; font-size:0.75rem; border-collapse:collapse; margin-top:10px; }
-    .preview-table th { text-align:left; padding:5px 8px; color:var(--muted); border-bottom:1px solid var(--border); font-weight:600; }
-    .preview-table td { padding:5px 8px; border-bottom:1px solid rgba(255,255,255,0.03); }
-    
-    /* Tabs */
-    .tabs { display:flex; gap:0; border-bottom:1px solid var(--border); margin-bottom:14px; }
-    .tab { padding:10px 18px; cursor:pointer; font-size:0.82rem; font-weight:500; color:var(--muted); border-bottom:2px solid transparent; transition:all 0.15s; }
-    .tab:hover { color:var(--text); }
-    .tab.active { color:var(--accent); border-bottom-color:var(--accent); }
-    .tab-content { display:none; }
-    .tab-content.active { display:block; }
-    
-    /* Conversation viewer */
-    .conv-list { max-height:300px; overflow-y:auto; }
-    .conv-item { padding:10px 12px; background:var(--bg); border-radius:8px; margin-bottom:6px; cursor:pointer; transition:all 0.15s; display:flex; justify-content:space-between; align-items:center; }
-    .conv-item:hover { background:rgba(59,130,246,0.08); border:1px solid var(--accent); margin:-1px; padding:9px 11px; }
-    .conv-name { font-weight:600; font-size:0.85rem; }
-    .conv-tel { color:var(--muted); font-size:0.75rem; font-family:'JetBrains Mono',monospace; }
-    
-    .chat-view { background:var(--bg); border-radius:8px; padding:14px; max-height:350px; overflow-y:auto; }
-    .chat-msg { margin-bottom:10px; max-width:85%; }
-    .chat-msg.sent { margin-left:auto; }
-    .chat-msg .bubble { padding:10px 14px; border-radius:12px; font-size:0.82rem; line-height:1.4; }
-    .chat-msg.received .bubble { background:var(--card); border:1px solid var(--border); border-bottom-left-radius:4px; }
-    .chat-msg.sent .bubble { background:rgba(59,130,246,0.2); border:1px solid rgba(59,130,246,0.3); border-bottom-right-radius:4px; }
-    .chat-msg .meta { font-size:0.65rem; color:var(--muted); margin-top:3px; padding:0 4px; }
-    .chat-msg.sent .meta { text-align:right; }
-    
-    /* Queue table */
-    .queue-table { width:100%; font-size:0.75rem; border-collapse:collapse; }
-    .queue-table th { text-align:left; padding:8px; color:var(--muted); border-bottom:1px solid var(--border); font-weight:600; position:sticky; top:0; background:var(--card); }
-    .queue-table td { padding:6px 8px; border-bottom:1px solid rgba(255,255,255,0.03); }
-    .queue-scroll { max-height:350px; overflow-y:auto; }
-  </style>
-</head>
-<body>
-
-<div class="header">
-  <h1>📡 <span>CelExpress</span> WhatsApp Bot</h1>
-  <span class="conn-badge off" id="connBadge">● Desconectado</span>
-</div>
-
-<div class="container">
-
-  <!-- Stats row -->
-  <div class="grid grid-4" style="margin-bottom:16px;">
-    <div class="card stat-card"><div class="num green" id="sEnviados">0</div><div class="label">Enviados hoy</div></div>
-    <div class="card stat-card"><div class="num blue" id="sClientes">0</div><div class="label">Clientes cargados</div></div>
-    <div class="card stat-card"><div class="num yellow" id="sConv">0</div><div class="label">Conversaciones</div></div>
-    <div class="card stat-card"><div class="num" id="sBot" style="color:var(--muted)">—</div><div class="label">ChatBot</div></div>
-  </div>
-
-  <div class="grid grid-2">
-    
-    <!-- ═══ COLUMNA IZQUIERDA ═══ -->
-    <div>
-      <!-- Conexión -->
-      <div class="card" style="margin-bottom:16px;">
-        <h2>📱 Conexión WhatsApp</h2>
-        <div id="qrArea"></div>
-        <div class="controls">
-          <button class="btn btn-primary" onclick="conectar()">Conectar</button>
-          <button class="btn btn-outline" onclick="verificarQR()">Ver QR</button>
-          <button class="btn btn-red btn-sm" onclick="desconectar()">Desconectar</button>
-        </div>
-      </div>
-      
-      <!-- Cargar Excel -->
-      <div class="card" style="margin-bottom:16px;">
-        <h2>📂 Cargar Cartera</h2>
-        <div class="file-drop" id="fileDrop" onclick="document.getElementById('fileInput').click()">
-          <div style="font-size:1.3rem;">📄</div>
-          <p>Click o arrastra tu Excel/CSV</p>
-          <p style="font-size:0.7rem;">Columnas: Cliente, Teléfono, Saldo, Días Atraso</p>
-        </div>
-        <input type="file" id="fileInput" accept=".xlsx,.xls,.csv" style="display:none" onchange="subirArchivo(this)">
-        <div id="fileResult" class="hidden" style="margin-top:12px;"></div>
-      </div>
-      
-      <!-- Campaña -->
-      <div class="card" style="margin-bottom:16px;">
-        <h2>📤 Campaña Masiva</h2>
-        <div style="margin-bottom:10px;">
-          <label>Nombre</label>
-          <input type="text" id="campNombre" placeholder="Cobranza Marzo 2026">
-        </div>
-        <div style="margin-bottom:10px;">
-          <label>Mensaje (plantilla)</label>
-          <textarea id="campPlantilla" rows="4" placeholder="Hola {nombre}, le recordamos su adeudo de {saldo}..."></textarea>
-          <div class="vars-help">Variables (click para insertar): <code onclick="insertVar('{nombre}')" style="cursor:pointer">{nombre}</code> <code onclick="insertVar('{saldo}')" style="cursor:pointer">{saldo}</code> <code onclick="insertVar('{dias}')" style="cursor:pointer">{dias}</code> <code onclick="insertVar('{telefono}')" style="cursor:pointer">{telefono}</code></div>
-        </div>
-        <div style="margin-bottom:10px;">
-          <label>Imagen estándar (opcional)</label>
-          <input type="file" id="campImagen" accept="image/*">
-        </div>
-        <div class="grid grid-4" style="gap:6px; margin-bottom:10px;">
-          <div><label>Delay mín (s)</label><input type="number" id="cfgDelayMin" value="25" min="10"></div>
-          <div><label>Delay máx (s)</label><input type="number" id="cfgDelayMax" value="90" min="20"></div>
-          <div><label>Lote</label><input type="number" id="cfgLote" value="8" min="3" max="15"></div>
-          <div><label>Lím. diario</label><input type="number" id="cfgLimite" value="45" min="10"></div>
-        </div>
-        <div class="controls">
-          <button class="btn btn-green" id="btnIniciar" onclick="iniciarCampana()" disabled>▶ Iniciar</button>
-          <button class="btn btn-yellow btn-sm" id="btnPausar" onclick="pausarCampana()" disabled>⏸ Pausar</button>
-          <button class="btn btn-red btn-sm" id="btnCancelar" onclick="cancelarCampana()" disabled>✕ Cancelar</button>
-          <button class="btn btn-outline btn-sm" onclick="resetCampana()" title="Forzar reset si se traba">🔧 Reset</button>
-        </div>
-        <div id="progresoArea" class="hidden" style="margin-top:14px;">
-          <div style="display:flex; justify-content:space-between; font-size:0.82rem;">
-            <span id="progTexto">0/0</span>
-            <span id="progPct" style="font-weight:700; color:var(--accent);">0%</span>
-          </div>
-          <div class="progress-bar"><div class="progress-fill" id="progBar" style="width:0%"></div></div>
-          <div style="display:flex; justify-content:space-between; font-size:0.72rem; color:var(--muted);">
-            <span>⏱ <span id="progETA">—</span></span>
-            <span>❌ <span id="progFail" style="color:var(--red);">0</span></span>
-          </div>
-        </div>
-      </div>
-
-      <!-- Gestores -->
-      <div class="card">
-        <h2>👥 Gestores</h2>
-        <div id="gestoresArea"></div>
-        <div class="controls" style="margin-top:8px;">
-          <button class="btn btn-outline btn-sm" onclick="location.href='/api/exportar/reporte'">📊 Reporte Excel</button>
-        </div>
-      </div>
-    </div>
-    
-    <!-- ═══ COLUMNA DERECHA — MONITOREO ═══ -->
-    <div>
-      <div class="card" style="min-height:600px;">
-        <div class="tabs">
-          <div class="tab active" onclick="switchTab('tabLive')">📡 Envío en Vivo</div>
-          <div class="tab" onclick="switchTab('tabConv')">💬 Conversaciones</div>
-          <div class="tab" onclick="switchTab('tabCola')">📋 Cola / Detalle</div>
-        </div>
-        
-        <!-- TAB 1: Log en vivo -->
-        <div class="tab-content active" id="tabLive">
-          <div class="log-panel" id="liveLog" style="max-height:520px;">
-            <div class="log-line"><span class="log-info">Esperando actividad...</span></div>
-          </div>
-        </div>
-        
-        <!-- TAB 2: Conversaciones -->
-        <div class="tab-content" id="tabConv">
-          <div id="convListView">
-            <p style="font-size:0.8rem; color:var(--muted); margin-bottom:10px;">Clientes que han respondido:</p>
-            <div class="conv-list" id="convList"></div>
-          </div>
-          <div id="convChatView" class="hidden">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-              <div>
-                <span class="conv-name" id="chatNombre">—</span>
-                <span class="conv-tel" id="chatTel" style="margin-left:8px;">—</span>
-                <span class="tag tag-info" id="chatEstado" style="margin-left:8px;">—</span>
-              </div>
-              <button class="btn btn-outline btn-sm" onclick="cerrarChat()">← Volver</button>
-            </div>
-            <div class="chat-view" id="chatView"></div>
-          </div>
-        </div>
-        
-        <!-- TAB 3: Cola / Detalle -->
-        <div class="tab-content" id="tabCola">
-          <div class="queue-scroll" id="queueScroll">
-            <table class="queue-table">
-              <thead><tr><th>Nombre</th><th>Teléfono</th><th>Estado</th><th>Hora</th></tr></thead>
-              <tbody id="queueBody"><tr><td colspan="4" style="color:var(--muted);">Sin datos</td></tr></tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-</div>
-
-<script>
-let contactosCargados = null;
-let activeTab = 'tabLive';
-
-// ═══════════════════════════════════
-// TABS
-// ═══════════════════════════════════
-function switchTab(id) {
-  activeTab = id;
-  document.querySelectorAll('.tab').forEach((t,i) => {
-    t.classList.toggle('active', ['tabLive','tabConv','tabCola'][i] === id);
-  });
-  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-  document.getElementById(id).classList.add('active');
-  
-  if (id === 'tabConv') cargarConversaciones();
-  if (id === 'tabCola') cargarCola();
-}
-
-// ═══════════════════════════════════
-// ESTADO GENERAL
-// ═══════════════════════════════════
-async function cargarEstado() {
-  try {
-    const r = await fetch('/api/estado');
-    const d = await r.json();
-    const badge = document.getElementById('connBadge');
-    
-    if (d.conectado) {
-      badge.className = 'conn-badge on';
-      badge.textContent = '● Conectado' + (d.info?.nombre ? ' — ' + d.info.nombre : '');
-      document.getElementById('qrArea').innerHTML = '';
-    } else {
-      badge.className = 'conn-badge off';
-      badge.textContent = '● Desconectado';
-    }
-    
-    if (d.chatbot) {
-      document.getElementById('sClientes').textContent = d.chatbot.clientesRegistrados || 0;
-      document.getElementById('sConv').textContent = d.chatbot.conversacionesActivas || 0;
-      document.getElementById('sBot').textContent = d.chatbot.activo ? '✅ ON' : '⏸ OFF';
-      document.getElementById('sBot').style.color = d.chatbot.activo ? 'var(--green)' : 'var(--muted)';
-      document.getElementById('gestoresArea').innerHTML = (d.chatbot.gestores || []).map(g =>
-        '<div class="gestor-row"><span>👤 ' + g.nombre + '</span><span style="color:var(--muted);font-size:0.82rem;">' + g.telefono + '</span></div>'
-      ).join('');
-    }
-    
-    if (d.progreso) {
-      actualizarProgreso(d.progreso);
-      document.getElementById('sEnviados').textContent = d.estadisticasEnvio?.config?.enviadosHoy || d.progreso.enviados || 0;
-    }
-    
-    document.getElementById('btnIniciar').disabled = !(contactosCargados && d.conectado);
-  } catch(e) { console.error(e); }
-}
-
-function actualizarProgreso(p) {
-  const area = document.getElementById('progresoArea');
-  const btnI = document.getElementById('btnIniciar');
-  const btnP = document.getElementById('btnPausar');
-  const btnC = document.getElementById('btnCancelar');
-  
-  if (p.enProgreso || p.enviados > 0 || p.fallidos > 0) {
-    area.classList.remove('hidden');
-    document.getElementById('progTexto').textContent = p.enviados + '/' + p.total + ' enviados';
-    document.getElementById('progPct').textContent = p.porcentaje + '%';
-    document.getElementById('progBar').style.width = p.porcentaje + '%';
-    document.getElementById('progFail').textContent = p.fallidos;
-    document.getElementById('progETA').textContent = p.tiempoEstimado > 0 ? '~' + p.tiempoEstimado + ' min' : '—';
-  }
-  
-  if (p.enProgreso) {
-    btnI.disabled = true;
-    btnP.disabled = false;
-    btnC.disabled = false;
-    btnP.textContent = p.pausado ? '▶ Reanudar' : '⏸ Pausar';
-    btnP.className = p.pausado ? 'btn btn-green btn-sm' : 'btn btn-yellow btn-sm';
-    btnP.onclick = p.pausado ? reanudarCampana : pausarCampana;
-  } else {
-    btnP.disabled = true;
-    btnC.disabled = true;
-  }
-}
-
-// ═══════════════════════════════════
-// LOG EN VIVO (ENVÍO MASIVO + CHATBOT)
-// ═══════════════════════════════════
-async function cargarLogVivo() {
-  if (activeTab !== 'tabLive') return;
-  try {
-    // Logs del envío masivo
-    const r1 = await fetch('/api/campana/logs?limite=30');
-    const logsEnvio = await r1.json();
-    
-    // Interacciones del chatbot
-    const r2 = await fetch('/api/chatbot/interacciones?limite=20');
-    const logsChat = await r2.json();
-    
-    // Combinar y ordenar por timestamp
-    const todos = [];
-    
-    logsEnvio.forEach(l => {
-      todos.push({
-        time: new Date(l.timestamp),
-        html: '<span class="log-tag ' + (l.tipo === 'enviado' ? 'ok' : 'err') + '">' + 
-          (l.tipo === 'enviado' ? '✅ ENVIADO' : '❌ FALLIDO') + '</span> ' +
-          '<span style="color:var(--text);">' + (l.nombre||'') + '</span> ' +
-          '<span style="color:var(--muted);">' + (l.telefono||'') + '</span>' +
-          (l.error ? ' <span style="color:var(--red);font-size:0.65rem;">' + l.error + '</span>' : '') +
-          ' <span style="color:var(--muted);font-size:0.65rem;">[' + l.progreso + ']</span>'
-      });
-    });
-    
-    logsChat.forEach(l => {
-      const tag = l.tipo === 'recibido' ? 'in' : l.tipo === 'enviado' ? 'out' : 'ok';
-      const label = l.tipo === 'recibido' ? '📩 RECIBIDO' : l.tipo === 'enviado' ? '🤖 BOT' : '🔄 ' + l.tipo.toUpperCase();
-      todos.push({
-        time: new Date(l.timestamp),
-        html: '<span class="log-tag ' + tag + '">' + label + '</span> ' +
-          '<span style="color:var(--muted);">' + l.telefono + '</span> ' +
-          '<span style="color:var(--text);">' + (l.detalle||'').substring(0,55) + '</span>'
-      });
-    });
-    
-    todos.sort((a,b) => b.time - a.time);
-    
-    const panel = document.getElementById('liveLog');
-    if (todos.length === 0) {
-      panel.innerHTML = '<div class="log-line"><span class="log-info">Esperando actividad...</span></div>';
-      return;
-    }
-    
-    panel.innerHTML = todos.slice(0, 50).map(t => {
-      const ts = t.time.toLocaleTimeString('es-MX', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
-      return '<div class="log-line"><span class="log-time">' + ts + '</span><span>' + t.html + '</span></div>';
-    }).join('');
-    
-  } catch(e) {}
-}
-
-// ═══════════════════════════════════
-// CONVERSACIONES
-// ═══════════════════════════════════
-async function cargarConversaciones() {
-  try {
-    const r = await fetch('/api/chatbot/conversaciones');
-    const data = await r.json();
-    const list = document.getElementById('convList');
-    
-    if (!data.length) {
-      list.innerHTML = '<p style="color:var(--muted); font-size:0.82rem; text-align:center; padding:20px;">Nadie ha respondido aún</p>';
-      return;
-    }
-    
-    list.innerHTML = data.map(c => {
-      const estado = c.estado || 'inicial';
-      const tagCls = estado === 'esperando_gestor' ? 'tag-wait' : estado === 'menu' ? 'tag-info' : 'tag-ok';
-      return '<div class="conv-item" onclick="verConversacion(\\'' + c.telefono + '\\')">' +
-        '<div><div class="conv-name">' + (c.telefono) + '</div>' +
-        '<div style="font-size:0.72rem;color:var(--muted);">Estado: ' + estado + '</div></div>' +
-        '<span class="tag ' + tagCls + '">' + estado + '</span></div>';
-    }).join('');
-  } catch(e) {}
-}
-
-async function verConversacion(tel) {
-  document.getElementById('convListView').classList.add('hidden');
-  document.getElementById('convChatView').classList.remove('hidden');
-  
-  try {
-    const r = await fetch('/api/conversacion/' + encodeURIComponent(tel));
-    const d = await r.json();
-    
-    document.getElementById('chatNombre').textContent = d.cliente?.nombre || tel;
-    document.getElementById('chatTel').textContent = tel;
-    document.getElementById('chatEstado').textContent = d.estado;
-    
-    const view = document.getElementById('chatView');
-    
-    if (!d.mensajes?.length) {
-      view.innerHTML = '<p style="color:var(--muted);text-align:center;padding:20px;">Sin mensajes registrados</p>';
-      return;
-    }
-    
-    view.innerHTML = d.mensajes.map(m => {
-      const isSent = m.tipo === 'enviado';
-      const time = new Date(m.timestamp).toLocaleTimeString('es-MX', {hour:'2-digit',minute:'2-digit'});
-      return '<div class="chat-msg ' + (isSent ? 'sent' : 'received') + '">' +
-        '<div class="bubble">' + (m.detalle||'').replace(/\\n/g,'<br>') + '</div>' +
-        '<div class="meta">' + time + ' · ' + m.tipo + '</div></div>';
-    }).join('');
-    
-    view.scrollTop = view.scrollHeight;
-  } catch(e) {
-    document.getElementById('chatView').innerHTML = '<p style="color:var(--red);">Error cargando</p>';
-  }
-}
-
-function cerrarChat() {
-  document.getElementById('convChatView').classList.add('hidden');
-  document.getElementById('convListView').classList.remove('hidden');
-}
-
-// ═══════════════════════════════════
-// COLA / DETALLE
-// ═══════════════════════════════════
-async function cargarCola() {
-  try {
-    const r = await fetch('/api/campana/detalle');
-    const data = await r.json();
-    const body = document.getElementById('queueBody');
-    
-    if (!data.length) {
-      body.innerHTML = '<tr><td colspan="4" style="color:var(--muted);">No hay campaña activa</td></tr>';
-      return;
-    }
-    
-    body.innerHTML = data.map(d => {
-      let tagCls = 'tag-wait', icon = '⏳';
-      if (d.estado === 'enviado') { tagCls = 'tag-ok'; icon = '✅'; }
-      else if (d.estado === 'fallido') { tagCls = 'tag-err'; icon = '❌'; }
-      else if (d.estado === 'saltado') { tagCls = 'tag-err'; icon = '⏭'; }
-      
-      const hora = d.enviadoEn ? new Date(d.enviadoEn).toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '—';
-      
-      return '<tr>' +
-        '<td>' + (d.nombre||'—') + '</td>' +
-        '<td style="font-family:\\'JetBrains Mono\\',monospace;font-size:0.72rem;">' + (d.telefono||'—') + '</td>' +
-        '<td><span class="tag ' + tagCls + '">' + icon + ' ' + d.estado + '</span>' + 
-          (d.error ? '<br><span style="font-size:0.65rem;color:var(--red);">' + d.error + '</span>' : '') + '</td>' +
-        '<td style="color:var(--muted);font-size:0.72rem;">' + hora + '</td></tr>';
-    }).join('');
-  } catch(e) {}
-}
-
-// ═══════════════════════════════════
-// CONEXIÓN
-// ═══════════════════════════════════
-async function conectar() {
-  await fetch('/api/conectar', { method:'POST' });
-  setTimeout(verificarQR, 2000);
-}
-async function verificarQR() {
-  const r = await fetch('/api/qr');
-  const d = await r.json();
-  if (d.qr) {
-    document.getElementById('qrArea').innerHTML = '<p style="text-align:center;font-size:0.82rem;color:var(--muted);">Escanea con WhatsApp:</p><img src="' + d.qr + '">';
-  } else if (d.conectado) {
-    document.getElementById('qrArea').innerHTML = '<p style="text-align:center;color:var(--green);font-size:0.82rem;">✅ Conectado</p>';
-  }
-  setTimeout(cargarEstado, 3000);
-}
-async function desconectar() {
-  await fetch('/api/desconectar', { method:'POST' });
-  cargarEstado();
-}
-
-// ═══════════════════════════════════
-// CARGAR EXCEL
-// ═══════════════════════════════════
-async function subirArchivo(input) {
-  const file = input.files[0];
-  if (!file) return;
-  const result = document.getElementById('fileResult');
-  result.classList.remove('hidden');
-  result.innerHTML = '<span class="tag tag-wait">Cargando...</span>';
-  const fd = new FormData();
-  fd.append('archivo', file);
-  try {
-    const r = await fetch('/api/subir-excel', { method:'POST', body:fd });
-    const d = await r.json();
-    if (d.exito) {
-      contactosCargados = d.datos;
-      let html = '<span class="tag tag-ok">✅ ' + d.totalRegistros + ' contactos</span>';
-      html += '<table class="preview-table"><tr>';
-      d.columnas.slice(0,5).forEach(c => html += '<th>' + c + '</th>');
-      html += '</tr>';
-      (d.preview || []).slice(0,3).forEach(row => {
-        html += '<tr>';
-        d.columnas.slice(0,5).forEach(c => html += '<td>' + (row[c]||'') + '</td>');
-        html += '</tr>';
-      });
-      html += '</table>';
-      result.innerHTML = html;
-      document.getElementById('fileDrop').classList.add('active');
-      cargarEstado();
-    } else {
-      result.innerHTML = '<span class="tag tag-err">❌ ' + d.mensaje + '</span>';
-    }
-  } catch(e) {
-    result.innerHTML = '<span class="tag tag-err">❌ ' + e.message + '</span>';
-  }
-  input.value = '';
-}
-
-const drop = document.getElementById('fileDrop');
-drop.addEventListener('dragover', e => { e.preventDefault(); drop.style.borderColor='var(--accent)'; });
-drop.addEventListener('dragleave', () => { drop.style.borderColor=''; });
-drop.addEventListener('drop', e => {
-  e.preventDefault(); drop.style.borderColor='';
-  const fi = document.getElementById('fileInput');
-  fi.files = e.dataTransfer.files;
-  subirArchivo(fi);
+process.on('SIGINT', () => {
+    console.log('\nCerrando...');
+    try { voskModel.free(); } catch(e){}
+    audioServer.close();
+    httpServer.close(() => process.exit(0));
 });
-
-// ═══════════════════════════════════
-// CAMPAÑA
-// ═══════════════════════════════════
-async function iniciarCampana() {
-  if (!contactosCargados?.length) return alert('Primero carga un Excel');
-  const plantilla = document.getElementById('campPlantilla').value.trim();
-  const imgInput = document.getElementById('campImagen');
-  if (!plantilla && !imgInput.files[0]) return alert('Escribe un mensaje o selecciona imagen');
-  
-  const fd = new FormData();
-  fd.append('contactos', JSON.stringify(contactosCargados));
-  fd.append('plantilla', plantilla);
-  fd.append('nombreCampana', document.getElementById('campNombre').value || 'Campaña ' + new Date().toLocaleDateString('es-MX'));
-  fd.append('config', JSON.stringify({
-    delayMinimo: parseInt(document.getElementById('cfgDelayMin').value) * 1000,
-    delayMaximo: parseInt(document.getElementById('cfgDelayMax').value) * 1000,
-    tamanoLote: parseInt(document.getElementById('cfgLote').value),
-    limiteDiario: parseInt(document.getElementById('cfgLimite').value),
-  }));
-  if (imgInput.files[0]) fd.append('imagen', imgInput.files[0]);
-  
-  try {
-    const r = await fetch('/api/campana/iniciar', { method:'POST', body:fd });
-    const d = await r.json();
-    if (d.exito) { switchTab('tabLive'); }
-    else { alert(d.mensaje); }
-    cargarEstado();
-  } catch(e) { alert('Error: ' + e.message); }
-}
-async function pausarCampana() { await fetch('/api/campana/pausar',{method:'POST'}); cargarEstado(); }
-async function reanudarCampana() { await fetch('/api/campana/reanudar',{method:'POST'}); cargarEstado(); }
-async function cancelarCampana() {
-  if (!confirm('¿Cancelar envío?')) return;
-  await fetch('/api/campana/cancelar',{method:'POST'});
-  cargarEstado();
-}
-async function resetCampana() {
-  if (!confirm('¿Forzar reset? Esto detiene todo y limpia la cola.')) return;
-  await fetch('/api/campana/reset',{method:'POST'});
-  cargarEstado();
-}
-function insertVar(v) {
-  const ta = document.getElementById('campPlantilla');
-  const start = ta.selectionStart;
-  const end = ta.selectionEnd;
-  const text = ta.value;
-  ta.value = text.substring(0, start) + v + text.substring(end);
-  ta.selectionStart = ta.selectionEnd = start + v.length;
-  ta.focus();
-}
-
-// ═══════════════════════════════════
-// INIT
-// ═══════════════════════════════════
-cargarEstado();
-cargarLogVivo();
-setInterval(cargarEstado, 4000);
-setInterval(cargarLogVivo, 3000);
-setInterval(() => { if (activeTab === 'tabCola') cargarCola(); }, 5000);
-setInterval(() => { if (activeTab === 'tabConv') cargarConversaciones(); }, 6000);
-</script>
-</body>
-</html>`;
-}
