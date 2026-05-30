@@ -525,12 +525,24 @@ class WhatsAppService {
       this.initializing = false;
       this.qrCode = null;
       this.qrTimestamp = null;
-      console.log('👋 Sesion cerrada');
+      // ★ FIX 2026-05: borrar credenciales del numero anterior.
+      // Sin esto, al reconectar con OTRO numero se cargaban las llaves de
+      // Signal viejas desde ./auth_session -> el socket conectaba (isConnected
+      // = true, panel mostraba ✅) pero los mensajes salian cifrados con la
+      // sesion anterior y el destinatario NO los recibia ("conecta pero no
+      // manda"). Solo se ejecuta en desconexion manual, asi que NO afecta la
+      // reconexion automatica por red (esa no pasa por cerrarSesion).
+      this.limpiarAuthDir();
+      // Resetear contador para que el siguiente QR arranque limpio
+      this.reconnectAttempts = 0;
+      console.log('👋 Sesion cerrada y credenciales limpiadas');
     } catch (error) {
       console.error('Error cerrando sesion:', error.message);
       this.sock = null;
       this.connected = false;
       this.initializing = false;
+      // Garantizar limpieza aunque algo haya fallado arriba
+      try { this.limpiarAuthDir(); } catch(e) {}
     }
   }
 }
