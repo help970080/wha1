@@ -1,7 +1,7 @@
 /**
  * ═══════════════════════════════════════════════════════════
  * CELEXPRESS - WHATSAPP MASIVO + CHATBOT
- * LMV CREDIA SA DE CV
+ * MULTI-EMPRESA (LeGaXi/CREDI YA) - marca desde config/empresa.js
  * ═══════════════════════════════════════════════════════════
  * 
  * Sistema completo de cobranza por WhatsApp:
@@ -23,6 +23,7 @@ const multer = require('multer');
 const XLSX = require('xlsx');
 const path = require('path');
 const fs = require('fs');
+const EMPRESA = require('./config/empresa');
 
 const WhatsAppService = require('./services/whatsappServiceBaileys');
 const EnvioMasivoService = require('./services/envioMasivoService');
@@ -461,7 +462,7 @@ app.get('/api/chatbot/gestores', (req, res) => {
 
 app.post('/api/chatbot/gestores', (req, res) => {
   const { gestores } = req.body;
-  if (gestores) chatbot.gestores = gestores;
+  if (gestores) EMPRESA.updateDespacho({ gestores });
   res.json({ exito: true, gestores: chatbot.gestores });
 });
 
@@ -938,6 +939,88 @@ app.get('/ping', (req, res) => res.send('pong'));
 // INTERFAZ WEB — PANEL DE CONTROL
 // ═══════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════
+// SUPER ADMIN — CONFIGURACIÓN DE ACREEDORAS
+// (despacho fijo LeGaXi + catálogo de empresas + activa)
+// Protegido con BOT_API_TOKEN (header: Authorization: Bearer <token>)
+// ═══════════════════════════════════════════════════════════
+
+function _checkAdminToken(req, res) {
+  const esperado = process.env.BOT_API_TOKEN;
+  if (!esperado) {
+    res.status(500).json({ success: false, error: 'BOT_API_TOKEN no configurado en Render' });
+    return false;
+  }
+  const recibido = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+  if (recibido !== esperado) {
+    res.status(401).json({ success: false, error: 'Token inválido' });
+    return false;
+  }
+  return true;
+}
+
+// Ver toda la configuración
+app.get('/api/config', (req, res) => {
+  if (!_checkAdminToken(req, res)) return;
+  res.json({
+    success: true,
+    despacho: EMPRESA.getDespacho(),
+    empresas: EMPRESA.getEmpresas(),
+    activaId: EMPRESA.getActivaId(),
+    activa: EMPRESA.getConfig()
+  });
+});
+
+// Cambiar acreedora ACTIVA (a nombre de quién cobra el bot)
+app.post('/api/config/activa', (req, res) => {
+  if (!_checkAdminToken(req, res)) return;
+  try {
+    const cfg = EMPRESA.setActiva(req.body.id);
+    console.log('🔀 Acreedora activa -> ' + cfg.empresaNombre + ' (' + cfg.id + ')');
+    res.json({ success: true, activa: cfg });
+  } catch (e) {
+    res.status(400).json({ success: false, error: e.message });
+  }
+});
+
+// Editar datos del despacho (LeGaXi): marca, lema, footer, gestores
+app.post('/api/config/despacho', (req, res) => {
+  if (!_checkAdminToken(req, res)) return;
+  try {
+    const d = EMPRESA.updateDespacho(req.body.despacho || req.body);
+    res.json({ success: true, despacho: d });
+  } catch (e) {
+    res.status(400).json({ success: false, error: e.message });
+  }
+});
+
+// Alta / edición de una acreedora
+app.post('/api/config/empresa', (req, res) => {
+  if (!_checkAdminToken(req, res)) return;
+  try {
+    const emp = EMPRESA.upsertEmpresa(req.body.empresa || req.body);
+    res.json({ success: true, empresa: emp });
+  } catch (e) {
+    res.status(400).json({ success: false, error: e.message });
+  }
+});
+
+// Borrar una acreedora
+app.delete('/api/config/empresa/:id', (req, res) => {
+  if (!_checkAdminToken(req, res)) return;
+  try {
+    const r = EMPRESA.deleteEmpresa(req.params.id);
+    res.json({ success: true, ...r });
+  } catch (e) {
+    res.status(400).json({ success: false, error: e.message });
+  }
+});
+
+// Panel Super Admin (HTML)
+app.get('/superadmin', (req, res) => {
+  res.sendFile(path.join(__dirname, 'superadmin.html'));
+});
+
 app.get('/', (req, res) => {
   res.send(getPanelHTML());
 });
@@ -949,12 +1032,13 @@ app.get('/', (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log('\n═══════════════════════════════════════════════════════════');
   console.log('🚀 CELEXPRESS WHATSAPP + CHATBOT + ENVÍO MASIVO');
-  console.log('   LMV CREDIA SA DE CV');
+  console.log('   DESPACHO: ' + EMPRESA.marca + ' (gestor)');
+  console.log('   COBRANDO PARA: ' + EMPRESA.empresaNombre + '  ->  ' + EMPRESA.acreedorLegal);
   console.log('═══════════════════════════════════════════════════════════');
   console.log(`📡 Servidor: http://localhost:${PORT}`);
   console.log('🤖 ChatBot: Esperando conexión WhatsApp...');
   console.log('📤 Envío Masivo: Listo (anti-baneo activado)');
-  console.log('👥 Gestores: Lic. Carlos, Lic. Gustavo');
+  console.log('👥 Gestores: ' + EMPRESA.gestores.map(g => g.nombre).join(', '));
   console.log('═══════════════════════════════════════════════════════════\n');
 });
 
