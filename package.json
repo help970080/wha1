@@ -1,7 +1,7 @@
 {
   "name": "celexpress-whatsapp-bot",
-  "version": "3.1.0",
-  "description": "Sistema WhatsApp Masivo + ChatBot con PDF de Convenio - LeGaXi/LMV CREDIA",
+  "version": "3.3.0",
+  "description": "WhatsApp Masivo + ChatBot Cobranza (LeGaXi) - Panel Super Admin multi-acreedora (CREDIA / CREDI YA / ...)",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
