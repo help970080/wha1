@@ -1016,6 +1016,40 @@ app.delete('/api/config/empresa/:id', (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════
+// PLANTILLAS DE GESTIÓN (para campañas desde el panel directo)
+// Variables disponibles: {nombre} {saldo} {dias} {telefono}
+//                        {despacho} {acreedor} {convenio}
+// (se resuelven al enviar, con la ACREEDORA ACTIVA)
+// ═══════════════════════════════════════════════════════════
+const PLANTILLAS_GESTION = [
+  {
+    id: 'recordatorio',
+    label: 'Recordatorio',
+    texto: '📋 *{despacho} — Cobranza*\n\nEstimado(a) {nombre}, le recordamos que su cuenta presenta un adeudo de *{saldo}* con *{dias} días* de atraso.\n\nRegularice su situación y evite cargos adicionales. Responda a este mensaje para conocer sus opciones de pago. 🙏'
+  },
+  {
+    id: 'urgente',
+    label: 'Urgente',
+    texto: '⚠️ *AVISO URGENTE — {despacho}*\n\n{nombre}, su adeudo de *{saldo}* tiene *{dias} días* de atraso. Este es un *aviso de última oportunidad* para regularizar antes de que su cuenta escale.\n\nResponda a este mensaje HOY para acceder a un convenio de pagos. ⏰'
+  },
+  {
+    id: 'judicial',
+    label: 'Judicial',
+    texto: '🚨 *COBRANZA JUDICIAL EN PROCESO*\n\n{nombre}, su cuenta con adeudo de *{saldo}* ({dias} días de atraso) está por turnarse a cobranza legal.\n\nAún puede evitarlo. Responda a este mensaje de inmediato para pactar un convenio de pago.\n\n— {despacho}'
+  },
+  {
+    id: 'convenio',
+    label: 'Convenio (con link)',
+    texto: '🤝 *{despacho} — Propuesta de Convenio*\n\n{nombre}, podemos regularizar su adeudo de *{saldo}* con un plan de pagos accesible.\n\n📄 Convenio: {convenio}\n\nResponda a este mensaje y le comparto las opciones (Plan Rápido o Plan Accesible). 🙏'
+  }
+];
+
+// Servir plantillas al panel
+app.get('/api/plantillas', (req, res) => {
+  res.json(PLANTILLAS_GESTION);
+});
+
 // Panel Super Admin (HTML)
 app.get('/superadmin', (req, res) => {
   res.sendFile(path.join(__dirname, 'superadmin.html'));
@@ -1246,7 +1280,8 @@ function getPanelHTML() {
         <div style="margin-bottom:10px;">
           <label>Mensaje (plantilla)</label>
           <textarea id="campPlantilla" rows="4" placeholder="Hola {nombre}, le recordamos su adeudo de {saldo}..."></textarea>
-          <div class="vars-help">Variables (click para insertar): <code onclick="insertVar('{nombre}')" style="cursor:pointer">{nombre}</code> <code onclick="insertVar('{saldo}')" style="cursor:pointer">{saldo}</code> <code onclick="insertVar('{dias}')" style="cursor:pointer">{dias}</code> <code onclick="insertVar('{telefono}')" style="cursor:pointer">{telefono}</code></div>
+          <div class="vars-help">Variables (click para insertar): <code onclick="insertVar('{nombre}')" style="cursor:pointer">{nombre}</code> <code onclick="insertVar('{saldo}')" style="cursor:pointer">{saldo}</code> <code onclick="insertVar('{dias}')" style="cursor:pointer">{dias}</code> <code onclick="insertVar('{telefono}')" style="cursor:pointer">{telefono}</code> <code onclick="insertVar('{despacho}')" style="cursor:pointer">{despacho}</code> <code onclick="insertVar('{convenio}')" style="cursor:pointer">{convenio}</code></div>
+          <div class="vars-help" style="margin-top:6px;">📝 Plantillas de gestión (click para usar): <span id="plantillasBtns"></span></div>
         </div>
         <div style="margin-bottom:10px;">
           <label>Imagen estándar (opcional)</label>
@@ -1692,11 +1727,33 @@ function insertVar(v) {
   ta.focus();
 }
 
+function cargarPlantillas() {
+  fetch('/api/plantillas').then(function(r){ return r.json(); }).then(function(list){
+    const cont = document.getElementById('plantillasBtns');
+    if (!cont) return;
+    cont.innerHTML = '';
+    list.forEach(function(p){
+      const b = document.createElement('code');
+      b.textContent = p.label;
+      b.style.cursor = 'pointer';
+      b.style.marginRight = '6px';
+      b.title = 'Insertar plantilla: ' + p.label;
+      b.onclick = function(){
+        const ta = document.getElementById('campPlantilla');
+        ta.value = p.texto;
+        ta.focus();
+      };
+      cont.appendChild(b);
+    });
+  }).catch(function(){});
+}
+
 // ═══════════════════════════════════
 // INIT
 // ═══════════════════════════════════
 cargarEstado();
 cargarLogVivo();
+cargarPlantillas();
 setInterval(cargarEstado, 4000);
 setInterval(cargarLogVivo, 3000);
 setInterval(() => { if (activeTab === 'tabCola') cargarCola(); }, 5000);
