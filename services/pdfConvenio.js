@@ -1,6 +1,6 @@
 /**
  * ═══════════════════════════════════════════════════════════
- * GENERADOR DE PDF DE CONVENIO - LeGaXi Asesores
+ * GENERADOR DE PDF DE CONVENIO - MULTI-EMPRESA (config/empresa.js)
  * Genera un PDF formal de Convenio de Reconocimiento de Adeudo
  * y Plan de Pagos, en memoria (Buffer).
  * ═══════════════════════════════════════════════════════════
@@ -8,6 +8,7 @@
 
 const PDFDocument = require('pdfkit');
 const crypto = require('crypto');
+const EMPRESA = require('../config/empresa');
 
 /**
  * Genera el folio del convenio: LGX-{plan}-{YYYYMMDD}-{hash6}
@@ -18,7 +19,7 @@ function generarFolio(cliente, plan) {
   const ymd = fecha.toISOString().slice(0, 10).replace(/-/g, '');
   const semilla = `${cliente.telefono || ''}-${cliente.saldo || 0}-${plan}-${Date.now()}`;
   const hash = crypto.createHash('sha256').update(semilla).digest('hex').slice(0, 6).toUpperCase();
-  return `LGX-${plan}-${ymd}-${hash}`;
+  return `${EMPRESA.folioPrefijo}-${plan}-${ymd}-${hash}`;
 }
 
 /**
@@ -84,7 +85,7 @@ function generarPDFConvenio(cliente, plan, planDatos) {
         margins: { top: 50, bottom: 50, left: 60, right: 60 },
         info: {
           Title: `Convenio ${folio}`,
-          Author: 'LeGaXi Asesores',
+          Author: EMPRESA.pdfAuthor,
           Subject: 'Convenio de Reconocimiento de Adeudo'
         }
       });
@@ -113,7 +114,7 @@ function generarPDFConvenio(cliente, plan, planDatos) {
 
       doc.moveDown(0.3);
       doc.fontSize(9).fillColor('#666').font('Helvetica')
-         .text('LeGaXi Asesores — Cobranza Mercantil Especializada', { align: 'center' });
+         .text(`${EMPRESA.marca} — ${EMPRESA.lema}`, { align: 'center' });
 
       // Folio destacado
       doc.moveDown(0.5);
@@ -129,7 +130,7 @@ function generarPDFConvenio(cliente, plan, planDatos) {
       doc.fontSize(9.5).font('Helvetica');
       doc.text(
         `En la Ciudad de México, a los ${fmtFechaLarga(ahora)}, comparecen por una parte ` +
-        `LMV CREDIA, S.A. DE C.V. (en adelante "EL ACREEDOR"), representada por LeGaXi Asesores ` +
+        `${EMPRESA.acreedorLegal} (en adelante "EL ACREEDOR"), representada por ${EMPRESA.representadaPor} ` +
         `para efectos de cobranza, y por otra parte el(la) C. ${cliente.nombre || '[NOMBRE DEL DEUDOR]'} ` +
         `(en adelante "EL DEUDOR"), identificado(a) mediante el número de teléfono celular ` +
         `${cliente.telefono || '[TELÉFONO]'}, quienes celebran el presente CONVENIO al tenor de las siguientes:`,
@@ -321,7 +322,7 @@ function generarPDFConvenio(cliente, plan, planDatos) {
         60, footerY, { width: doc.page.width - 120, align: 'center' }
       );
       doc.fontSize(7).fillColor('#b8932f').font('Helvetica-Bold');
-      doc.text('LeGaXi Asesores · Cobranza Mercantil Especializada · ' + folio,
+      doc.text(`${EMPRESA.marca} · ${EMPRESA.lema} · ` + folio,
                60, footerY + 35, { width: doc.page.width - 120, align: 'center' });
 
       doc.end();
