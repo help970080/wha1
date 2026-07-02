@@ -1,6 +1,6 @@
 /**
  * ═══════════════════════════════════════════════════════════
- * ChatBot de Cobranza - LeGaXi Asesores  (v2 - FIX IDENTIFICACIÓN)
+ * ChatBot de Cobranza - MULTI-EMPRESA (marca desde config/empresa.js)
  * Cobranza Mercantil Especializada
  * ═══════════════════════════════════════════════════════════
  *
@@ -21,50 +21,20 @@
  */
 
 const fs = require('fs');
+const EMPRESA = require('../config/empresa');
 
 class ChatBotCobranza {
+  // Config LIVE desde config/empresa.js (despacho LeGaXi + acreedora ACTIVA).
+  // Al cambiar la acreedora en el panel, estos valores cambian sin reiniciar.
+  get gestores()       { return EMPRESA.gestores; }
+  get datosBancarios() { return EMPRESA.datosBancarios; }
+  get CONVENIO()       { return EMPRESA.convenio; }
+
   constructor(whatsappService) {
     this.whatsapp = whatsappService;
 
-    // Gestores configurados
-    this.gestores = [
-      { nombre: 'Lic. Carlos', telefono: '7352588215', activo: true },
-      { nombre: 'Lic. Gustavo', telefono: '5548039744', activo: true }
-    ];
+    // gestores / datosBancarios / CONVENIO -> getters LIVE (arriba)
     this.gestorActual = 0;
-
-    // Datos bancarios reales
-    this.datosBancarios = {
-      spinOxxo: {
-        nombre: 'SPIN - OXXO',
-        clabe: '7289 6900 0166 6769 82',
-        tarjeta: '4217 4702 1177 5578',
-      },
-      bbva: {
-        nombre: 'BBVA - BANCOMER',
-        clabe: '0121 8001 5055 5747 30',
-        tarjeta: '4152 3143 7377 5678',
-      },
-      titular: 'Lic. Francisco Gabriel García Sánchez',
-    };
-
-    // ═══════════════════════════════════════
-    // CONFIGURACIÓN DE CONVENIOS v3 (2026-05)
-    // ═══════════════════════════════════════
-    this.CONVENIO = {
-      // 2 planes por PISO MÍNIMO de pago semanal.
-      // El pago real puede ser >= al piso; se calcula buscando el máximo
-      // de semanas posibles sin que el pago caiga por debajo del piso.
-      planA_monto: 1000,   // Plan rápido (piso $1,000/sem)
-      planB_monto: 500,    // Plan accesible (piso $500/sem)
-      // Recargo si el plazo supera 4 semanas
-      semanasSinRecargo: 4,
-      recargo: 0.15,
-      // Si el saldo cabe en 4 semanas o menos con $1,000/sem -> pago único
-      umbralPagoUnico: 4000,
-      // URL pública del convenio prellenado (CAMBIAR cuando se confirme hosting)
-      urlConvenio: process.env.CONVENIO_URL || 'https://convenios.celexpress.org/LGX_Convenios.html'
-    };
 
     // Datos en memoria
     this.clientes = new Map();
@@ -133,7 +103,7 @@ class ChatBotCobranza {
 
     console.log('\n🤖 ════════════════════════════════════');
     console.log('   CHATBOT DE COBRANZA INICIADO');
-    console.log('   LeGaXi Asesores - CME (v2)');
+    console.log('   ' + EMPRESA.marca + ' - Cobranza (' + EMPRESA.id + ')');
     console.log('   MODO: COBRANZA FIRME');
     console.log('════════════════════════════════════\n');
 
@@ -473,7 +443,7 @@ Por favor envíe su *nombre completo* tal como aparece en su contrato, o su *nú
       }
       // Primer mensaje sin identificar → pedir datos
       this.guardarConversacion(telefono, this.ESTADOS.IDENTIFICACION);
-      return `👋 Hola, le saluda *LeGaXi Asesores* — Cobranza Mercantil Especializada.
+      return `👋 Hola, le saluda *${EMPRESA.marca}* — ${EMPRESA.lema}.
 
 No logro identificarlo en nuestro sistema. ¿Me podría confirmar su *nombre completo* o su *número de crédito* para atenderlo correctamente?
 
@@ -885,7 +855,7 @@ con sus datos personalizados:
 📎 _Su convenio en PDF llegará en unos segundos..._
 
 ━━━━━━━━━━━━━━━━━━━━━
-_LeGaXi Asesores · Cobranza Mercantil_`;
+_${EMPRESA.footerCorto}_`;
   }
 
   /**
@@ -1100,7 +1070,7 @@ Le esperamos con su primer pago el *${this.fmtFecha(planDatos?.fechaInicio || ne
 
 Que tenga excelente día.
 
-_LeGaXi Asesores_`;
+_${EMPRESA.marca}_`;
     }
 
     // Cliente quiere ver datos bancarios otra vez
@@ -1180,7 +1150,7 @@ ${this.getDatosBancarios(nombre)}
 🙏 *Gracias por su compromiso.*
 
 ━━━━━━━━━━━━━━━━━━━━━
-_LeGaXi Asesores · Cobranza Mercantil_`;
+_${EMPRESA.footerCorto}_`;
   }
 
   /**
@@ -1441,7 +1411,7 @@ _Cobranza Mercantil Especializada_`
         header = `📋 *RECORDATORIO DE PAGO PENDIENTE*`;
         break;
       default:
-        header = `📞 *LeGaXi Asesores — Cobranza*`;
+        header = `📞 *${EMPRESA.marca} — Cobranza*`;
     }
 
     // CASO 1: Saldo bajo -> pago único directo
