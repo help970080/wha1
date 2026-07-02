@@ -1050,6 +1050,16 @@ app.get('/api/plantillas', (req, res) => {
   res.json(PLANTILLAS_GESTION);
 });
 
+// Cartera actualmente cargada en el bot (para restaurar la campaña tras recargar)
+app.get('/api/cartera', (req, res) => {
+  try {
+    const lista = chatbot && chatbot.clientes ? Array.from(chatbot.clientes.values()) : [];
+    res.json({ exito: true, total: lista.length, datos: lista });
+  } catch (e) {
+    res.status(500).json({ exito: false, mensaje: e.message, datos: [] });
+  }
+});
+
 // Panel Super Admin (HTML)
 app.get('/superadmin', (req, res) => {
   res.sendFile(path.join(__dirname, 'superadmin.html'));
@@ -1680,6 +1690,7 @@ drop.addEventListener('drop', e => {
 // CAMPAÑA
 // ═══════════════════════════════════
 async function iniciarCampana() {
+  if (!contactosCargados?.length) await restaurarCartera();
   if (!contactosCargados?.length) return alert('Primero carga un Excel');
   const plantilla = document.getElementById('campPlantilla').value.trim();
   const imgInput = document.getElementById('campImagen');
@@ -1748,12 +1759,38 @@ function cargarPlantillas() {
   }).catch(function(){});
 }
 
+// Recupera la cartera ya cargada en el bot para que la campaña funcione tras recargar
+async function restaurarCartera() {
+  if (contactosCargados && contactosCargados.length) return;
+  try {
+    const r = await fetch('/api/cartera');
+    const d = await r.json();
+    if (d.exito && d.datos && d.datos.length) {
+      contactosCargados = d.datos;
+      const result = document.getElementById('fileResult');
+      if (result) {
+        result.classList.remove('hidden');
+        let html = '<span class="tag tag-ok">✅ ' + d.datos.length + ' contactos (cargados en el bot)</span>';
+        html += '<table class="preview-table"><tr><th>NOMBRE</th><th>SALDO</th><th>DIAS</th><th>TELEFONO</th></tr>';
+        d.datos.slice(0, 3).forEach(function(c){
+          html += '<tr><td>' + (c.nombre || '') + '</td><td>' + (c.saldo || 0) + '</td><td>' + (c.diasAtraso || 0) + '</td><td>' + (c.telefono || '') + '</td></tr>';
+        });
+        html += '</table>';
+        result.innerHTML = html;
+      }
+      const btn = document.getElementById('btnIniciar');
+      if (btn) btn.disabled = false;
+    }
+  } catch (e) {}
+}
+
 // ═══════════════════════════════════
 // INIT
 // ═══════════════════════════════════
 cargarEstado();
 cargarLogVivo();
 cargarPlantillas();
+restaurarCartera();
 setInterval(cargarEstado, 4000);
 setInterval(cargarLogVivo, 3000);
 setInterval(() => { if (activeTab === 'tabCola') cargarCola(); }, 5000);
