@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Super Admin · Cobranza LeGaXi</title>
+<style>
+  :root{
+    --bg1:#0b1220; --bg2:#131f36; --card:#16213b; --card2:#1b2846;
+    --gold:#c9a227; --gold2:#e5c869; --txt:#e8edf6; --muted:#8ea3c4;
+    --line:#28375c; --ok:#2ecc71; --bad:#e74c3c; --blue:#3b82f6;
+  }
+  *{box-sizing:border-box;font-family:'Segoe UI',system-ui,sans-serif}
+  body{margin:0;background:linear-gradient(135deg,var(--bg1),var(--bg2));color:var(--txt);min-height:100vh;padding:22px}
+  h1,h2,h3{margin:0}
+  .wrap{max-width:1040px;margin:0 auto}
+  header{display:flex;align-items:center;gap:14px;margin-bottom:20px;flex-wrap:wrap}
+  header .logo{width:46px;height:46px;border-radius:12px;background:linear-gradient(135deg,var(--gold),var(--gold2));
+    display:flex;align-items:center;justify-content:center;font-weight:800;color:#1a1204;font-size:20px}
+  header h1{font-size:20px;letter-spacing:.5px}
+  header small{color:var(--muted);display:block;font-weight:400;font-size:12px;margin-top:2px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:18px;
+    box-shadow:0 6px 20px rgba(0,0,0,.25)}
+  .card h2{font-size:15px;color:var(--gold2);margin-bottom:14px;display:flex;align-items:center;gap:8px;
+    text-transform:uppercase;letter-spacing:1px}
+  label{display:block;font-size:11px;color:var(--muted);margin:10px 0 4px;text-transform:uppercase;letter-spacing:.5px}
+  input,select{width:100%;background:var(--bg1);border:1px solid var(--line);color:var(--txt);
+    padding:10px 12px;border-radius:9px;font-size:14px;outline:none}
+  input:focus{border-color:var(--gold)}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+  .row{display:flex;gap:10px;align-items:center;margin-bottom:8px}
+  .row input{flex:1}
+  button{background:linear-gradient(135deg,var(--gold),var(--gold2));color:#1a1204;border:none;
+    padding:10px 16px;border-radius:9px;font-weight:700;cursor:pointer;font-size:13px}
+  button:hover{filter:brightness(1.08)}
+  button.ghost{background:transparent;border:1px solid var(--line);color:var(--muted)}
+  button.danger{background:transparent;border:1px solid var(--bad);color:var(--bad)}
+  button.blue{background:linear-gradient(135deg,#2563eb,#3b82f6);color:#fff}
+  .badge{display:inline-flex;align-items:center;gap:8px;background:rgba(201,162,39,.14);
+    border:1px solid var(--gold);color:var(--gold2);padding:8px 14px;border-radius:30px;font-weight:700;font-size:14px}
+  .emp{border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:14px;background:var(--card2)}
+  .emp.active{border-color:var(--gold);box-shadow:0 0 0 1px var(--gold) inset}
+  .emp-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:8px}
+  .emp-head .name{font-size:16px;font-weight:700}
+  .emp-head .tag{font-size:11px;color:var(--muted)}
+  .sub{font-size:12px;color:var(--gold2);margin:14px 0 2px;text-transform:uppercase;letter-spacing:.6px;
+    border-top:1px dashed var(--line);padding-top:10px}
+  .actions{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}
+  .hint{font-size:12px;color:var(--muted);margin-top:6px}
+  #toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--card2);
+    border:1px solid var(--line);padding:12px 20px;border-radius:10px;font-weight:600;display:none;z-index:99}
+  #toast.ok{border-color:var(--ok);color:var(--ok)} #toast.bad{border-color:var(--bad);color:var(--bad)}
+  #gate{max-width:420px;margin:80px auto;text-align:center}
+  #gate .card{padding:28px}
+  .fixed-tag{font-size:10px;background:var(--line);color:var(--muted);padding:2px 8px;border-radius:20px;margin-left:8px}
+  @media(max-width:640px){.grid,.grid3{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<!-- ── Puerta de acceso (token) ── -->
+<div id="gate">
+  <div class="card">
+    <div class="logo" style="margin:0 auto 14px">LG</div>
+    <h2 style="justify-content:center">Panel Super Admin</h2>
+    <p class="hint" style="text-align:center;margin-bottom:16px">Configuración de acreedoras · LeGaXi Asociados</p>
+    <label>BOT_API_TOKEN</label>
+    <input id="tokenInput" type="password" placeholder="Token de administrador" autocomplete="off">
+    <button style="width:100%;margin-top:14px" onclick="entrar()">Entrar</button>
+    <p class="hint" id="gateErr" style="color:var(--bad)"></p>
+  </div>
+</div>
+
+<!-- ── Panel ── -->
+<div class="wrap" id="panel" style="display:none">
+  <header>
+    <div class="logo">LG</div>
+    <div>
+      <h1>Panel Super Admin<small>LeGaXi Asociados · gestión de cobranza por acreedora</small></h1>
+    </div>
+    <div style="margin-left:auto"><button class="ghost" onclick="salir()">Salir</button></div>
+  </header>
+
+  <!-- Acreedora activa -->
+  <div class="card">
+    <h2>⚡ Acreedora activa</h2>
+    <p class="hint">A nombre de quién cobra el bot en este momento. Cambia en vivo (no reinicia).</p>
+    <div class="row" style="margin-top:12px">
+      <div class="badge">Cobrando a nombre de: <span id="activaNombre">—</span></div>
+    </div>
+    <label>Cambiar acreedora activa</label>
+    <div class="row">
+      <select id="selActiva"></select>
+      <button class="blue" onclick="cambiarActiva()">Activar</button>
+    </div>
+  </div>
+
+  <!-- Despacho (fijo) -->
+  <div class="card">
+    <h2>🏛️ Despacho gestor <span class="fixed-tag">FIJO</span></h2>
+    <p class="hint">Quien saluda y representa. Es LeGaXi para todas las acreedoras.</p>
+    <div class="grid">
+      <div><label>Marca (nombre visible)</label><input id="d_marca"></div>
+      <div><label>Lema</label><input id="d_lema"></div>
+    </div>
+    <label>Pie de mensajes (footer corto)</label>
+    <input id="d_footer">
+    <div class="sub">Gestores (reciben avisos)</div>
+    <div id="gestores"></div>
+    <button class="ghost" onclick="addGestor()">+ Agregar gestor</button>
+    <div class="actions"><button onclick="guardarDespacho()">Guardar despacho</button></div>
+  </div>
+
+  <!-- Acreedoras -->
+  <div class="card">
+    <h2>🏢 Empresas acreedoras</h2>
+    <p class="hint">Cada una con su razón social (para el PDF), cuentas de depósito, folio y convenio.</p>
+    <div id="empresas"></div>
+    <button class="blue" onclick="addEmpresa()">+ Agregar acreedora</button>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const LS_KEY='legaxi_admin_token';
+let TOKEN=localStorage.getItem(LS_KEY)||'';
+let DATA=null;
+
+function H(){return{'Authorization':'Bearer '+TOKEN,'Content-Type':'application/json'};}
+function toast(msg,ok=true){const t=document.getElementById('toast');t.textContent=msg;t.className=ok?'ok':'bad';
+  t.style.display='block';setTimeout(()=>t.style.display='none',2600);}
+function esc(s){return String(s==null?'':s).replace(/"/g,'&quot;');}
+
+async function entrar(){
+  TOKEN=document.getElementById('tokenInput').value.trim();
+  if(!TOKEN)return;
+  const err=document.getElementById('gateErr');err.textContent='';
+  try{
+    const r=await fetch('/api/config',{headers:H()});
+    if(!r.ok){const j=await r.json().catch(()=>({}));err.textContent=j.error||('Error '+r.status);return;}
+    localStorage.setItem(LS_KEY,TOKEN);
+    document.getElementById('gate').style.display='none';
+    document.getElementById('panel').style.display='block';
+    DATA=await r.json();render();
+  }catch(e){err.textContent='No se pudo conectar al servidor';}
+}
+function salir(){localStorage.removeItem(LS_KEY);location.reload();}
+
+async function cargar(){
+  const r=await fetch('/api/config',{headers:H()});
+  if(!r.ok){toast('Error al cargar',false);return;}
+  DATA=await r.json();render();
+}
+
+function render(){
+  // Activa
+  document.getElementById('activaNombre').textContent=DATA.activa.empresaNombre+' ('+DATA.activaId+')';
+  const sel=document.getElementById('selActiva');sel.innerHTML='';
+  Object.values(DATA.empresas).forEach(e=>{
+    const o=document.createElement('option');o.value=e.id;
+    o.textContent=e.nombre+' — '+e.acreedorLegal;
+    if(e.id===DATA.activaId)o.selected=true;sel.appendChild(o);
+  });
+  // Despacho
+  const d=DATA.despacho;
+  document.getElementById('d_marca').value=d.marca||'';
+  document.getElementById('d_lema').value=d.lema||'';
+  document.getElementById('d_footer').value=d.footerCorto||'';
+  renderGestores(d.gestores||[]);
+  // Empresas
+  const cont=document.getElementById('empresas');cont.innerHTML='';
+  Object.values(DATA.empresas).forEach(e=>cont.appendChild(empCard(e)));
+}
+
+// ── Gestores ──
+function renderGestores(list){
+  const c=document.getElementById('gestores');c.innerHTML='';
+  list.forEach((g,i)=>c.appendChild(gestorRow(g,i)));
+}
+function gestorRow(g,i){
+  const div=document.createElement('div');div.className='row';
+  div.innerHTML='<input placeholder="Nombre" value="'+esc(g.nombre)+'" data-g="nombre">'+
+    '<input placeholder="Teléfono 10 díg." value="'+esc(g.telefono)+'" data-g="telefono">'+
+    '<button class="danger" title="Quitar">✕</button>';
+  div.querySelector('button').onclick=()=>div.remove();
+  return div;
+}
+function addGestor(){document.getElementById('gestores').appendChild(gestorRow({nombre:'',telefono:''}));}
+function leerGestores(){
+  return [...document.querySelectorAll('#gestores .row')].map(r=>({
+    nombre:r.querySelector('[data-g=nombre]').value.trim(),
+    telefono:r.querySelector('[data-g=telefono]').value.replace(/\D/g,''),
+    activo:true
+  })).filter(g=>g.nombre&&g.telefono);
+}
+async function guardarDespacho(){
+  const despacho={
+    marca:document.getElementById('d_marca').value.trim(),
+    lema:document.getElementById('d_lema').value.trim(),
+    footerCorto:document.getElementById('d_footer').value.trim(),
+    gestores:leerGestores()
+  };
+  const r=await fetch('/api/config/despacho',{method:'POST',headers:H(),body:JSON.stringify({despacho})});
+  const j=await r.json();
+  if(j.success){toast('Despacho guardado');cargar();}else toast(j.error||'Error',false);
+}
+
+// ── Empresas ──
+function empCard(e){
+  const b=e.datosBancarios||{spinOxxo:{},bbva:{}},cv=e.convenio||{};
+  const div=document.createElement('div');
+  div.className='emp'+(e.id===DATA.activaId?' active':'');
+  div.dataset.id=e.id;
+  div.innerHTML=`
+    <div class="emp-head">
+      <div><span class="name">${esc(e.nombre)}</span><span class="tag"> · id: ${esc(e.id)}${e.id===DATA.activaId?' · ACTIVA':''}</span></div>
+      <div>
+        ${e.id===DATA.activaId?'':'<button class="ghost" data-act="activar">Activar</button> '}
+        <button class="danger" data-act="borrar">Borrar</button>
+      </div>
+    </div>
+    <div class="grid">
+      <div><label>Nombre corto</label><input data-f="nombre" value="${esc(e.nombre)}"></div>
+      <div><label>Prefijo de folio</label><input data-f="folioPrefijo" value="${esc(e.folioPrefijo)}"></div>
+    </div>
+    <label>Razón social legal (aparece en el PDF del convenio)</label>
+    <input data-f="acreedorLegal" value="${esc(e.acreedorLegal)}">
+
+    <div class="sub">Cuentas de depósito</div>
+    <div class="grid3">
+      <div><label>SPIN/OXXO · nombre</label><input data-b="spinOxxo.nombre" value="${esc(b.spinOxxo?.nombre)}"></div>
+      <div><label>SPIN · CLABE</label><input data-b="spinOxxo.clabe" value="${esc(b.spinOxxo?.clabe)}"></div>
+      <div><label>SPIN · Tarjeta</label><input data-b="spinOxxo.tarjeta" value="${esc(b.spinOxxo?.tarjeta)}"></div>
+      <div><label>BBVA · nombre</label><input data-b="bbva.nombre" value="${esc(b.bbva?.nombre)}"></div>
+      <div><label>BBVA · CLABE</label><input data-b="bbva.clabe" value="${esc(b.bbva?.clabe)}"></div>
+      <div><label>BBVA · Tarjeta</label><input data-b="bbva.tarjeta" value="${esc(b.bbva?.tarjeta)}"></div>
+    </div>
+    <label>Titular de las cuentas</label>
+    <input data-b="titular" value="${esc(b.titular)}">
+
+    <div class="sub">Convenio</div>
+    <div class="grid3">
+      <div><label>Piso Plan A ($/sem)</label><input data-c="planA_monto" type="number" value="${esc(cv.planA_monto)}"></div>
+      <div><label>Piso Plan B ($/sem)</label><input data-c="planB_monto" type="number" value="${esc(cv.planB_monto)}"></div>
+      <div><label>Semanas sin recargo</label><input data-c="semanasSinRecargo" type="number" value="${esc(cv.semanasSinRecargo)}"></div>
+      <div><label>Recargo (ej. 0.15)</label><input data-c="recargo" type="number" step="0.01" value="${esc(cv.recargo)}"></div>
+      <div><label>Umbral pago único ($)</label><input data-c="umbralPagoUnico" type="number" value="${esc(cv.umbralPagoUnico)}"></div>
+      <div><label>URL del convenio</label><input data-c="urlConvenio" value="${esc(cv.urlConvenio)}"></div>
+    </div>
+    <div class="actions"><button data-act="guardar">Guardar acreedora</button></div>
+  `;
+  div.querySelector('[data-act=guardar]').onclick=()=>guardarEmpresa(div,e.id);
+  const bA=div.querySelector('[data-act=activar]');if(bA)bA.onclick=()=>{document.getElementById('selActiva').value=e.id;cambiarActiva();};
+  div.querySelector('[data-act=borrar]').onclick=()=>borrarEmpresa(e.id);
+  return div;
+}
+
+function leerEmp(div){
+  const val=s=>{const el=div.querySelector('[data-f="'+s+'"]');return el?el.value.trim():undefined;};
+  const b=s=>{const el=div.querySelector('[data-b="'+s+'"]');return el?el.value.trim():'';};
+  const c=s=>{const el=div.querySelector('[data-c="'+s+'"]');return el?el.value:'';};
+  const id=(val('nombre')||div.dataset.id||'').toLowerCase().replace(/[^a-z0-9_]/g,'')||div.dataset.id;
+  return {
+    id:div.dataset.id&&div.dataset.id!=='__new__'?div.dataset.id:id,
+    nombre:val('nombre'),
+    acreedorLegal:val('acreedorLegal'),
+    folioPrefijo:val('folioPrefijo'),
+    datosBancarios:{
+      spinOxxo:{nombre:b('spinOxxo.nombre'),clabe:b('spinOxxo.clabe'),tarjeta:b('spinOxxo.tarjeta')},
+      bbva:{nombre:b('bbva.nombre'),clabe:b('bbva.clabe'),tarjeta:b('bbva.tarjeta')},
+      titular:b('titular')
+    },
+    convenio:{
+      planA_monto:+c('planA_monto'),planB_monto:+c('planB_monto'),
+      semanasSinRecargo:+c('semanasSinRecargo'),recargo:+c('recargo'),
+      umbralPagoUnico:+c('umbralPagoUnico'),urlConvenio:c('urlConvenio').trim()
+    }
+  };
+}
+
+async function guardarEmpresa(div,id){
+  const emp=leerEmp(div);
+  if(!emp.nombre){toast('Falta nombre',false);return;}
+  const r=await fetch('/api/config/empresa',{method:'POST',headers:H(),body:JSON.stringify({empresa:emp})});
+  const j=await r.json();
+  if(j.success){toast('Acreedora guardada: '+j.empresa.nombre);cargar();}else toast(j.error||'Error',false);
+}
+async function borrarEmpresa(id){
+  if(!confirm('¿Borrar la acreedora "'+id+'"?'))return;
+  const r=await fetch('/api/config/empresa/'+id,{method:'DELETE',headers:H()});
+  const j=await r.json();
+  if(j.success){toast('Acreedora borrada');cargar();}else toast(j.error||'Error',false);
+}
+function addEmpresa(){
+  const nueva={id:'__new__',nombre:'NUEVA ACREEDORA',acreedorLegal:'[RAZÓN SOCIAL S.A. DE C.V.]',
+    folioPrefijo:'NEW',datosBancarios:{spinOxxo:{nombre:'SPIN - OXXO',clabe:'',tarjeta:''},
+    bbva:{nombre:'BBVA - BANCOMER',clabe:'',tarjeta:''},titular:''},
+    convenio:{planA_monto:1000,planB_monto:500,semanasSinRecargo:4,recargo:0.15,umbralPagoUnico:4000,urlConvenio:''}};
+  const card=empCard(nueva);
+  document.getElementById('empresas').appendChild(card);
+  card.scrollIntoView({behavior:'smooth'});
+  toast('Edita y presiona "Guardar acreedora". El id se genera del nombre.');
+}
+
+async function cambiarActiva(){
+  const id=document.getElementById('selActiva').value;
+  const r=await fetch('/api/config/activa',{method:'POST',headers:H(),body:JSON.stringify({id})});
+  const j=await r.json();
+  if(j.success){toast('Ahora cobrando a nombre de: '+j.activa.empresaNombre);cargar();}else toast(j.error||'Error',false);
+}
+
+// Auto-login si ya hay token guardado
+if(TOKEN){document.getElementById('tokenInput').value=TOKEN;entrar();}
+</script>
+</body>
+</html>
