@@ -1690,7 +1690,7 @@ drop.addEventListener('drop', e => {
 // CAMPAÑA
 // ═══════════════════════════════════
 async function iniciarCampana() {
-  if (!contactosCargados?.length) await restaurarCartera();
+  await restaurarCartera(true); // fuente de verdad: cartera normalizada del bot (evita problemas de encabezados)
   if (!contactosCargados?.length) return alert('Primero carga un Excel');
   const plantilla = document.getElementById('campPlantilla').value.trim();
   const imgInput = document.getElementById('campImagen');
@@ -1759,9 +1759,10 @@ function cargarPlantillas() {
   }).catch(function(){});
 }
 
-// Recupera la cartera ya cargada en el bot para que la campaña funcione tras recargar
-async function restaurarCartera() {
-  if (contactosCargados && contactosCargados.length) return;
+// Recupera la cartera ya cargada en el bot (normalizada) para la campaña.
+// force=true la refresca aunque ya haya algo cargado (fuente de verdad = el bot).
+async function restaurarCartera(force) {
+  if (!force && contactosCargados && contactosCargados.length) return;
   try {
     const r = await fetch('/api/cartera');
     const d = await r.json();
