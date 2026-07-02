@@ -18,6 +18,7 @@
  */
 
 const fs = require('fs');
+const EMPRESA = require('../config/empresa');
 const path = require('path');
 
 class EnvioMasivoService {
@@ -198,6 +199,14 @@ class EnvioMasivoService {
     );
     mensaje = mensaje.replace(/\{dias\}/gi, contacto.diasAtraso || '0');
     mensaje = mensaje.replace(/\{telefono\}/gi, contacto.telefono || '');
+
+    // Variables de la ACREEDORA ACTIVA (despacho fijo LeGaXi + acreedor + convenio)
+    try {
+      const cfg = EMPRESA.getConfig();
+      mensaje = mensaje.replace(/\{convenio\}/gi, (cfg.convenio && cfg.convenio.urlConvenio) || '');
+      mensaje = mensaje.replace(/\{despacho\}/gi, cfg.marca || '');
+      mensaje = mensaje.replace(/\{acreedor\}/gi, cfg.empresaNombre || '');
+    } catch (e) { /* si config no disponible, se dejan tal cual */ }
     
     // Variación anti-detección
     mensaje = this.variarTexto(mensaje);
