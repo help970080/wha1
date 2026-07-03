@@ -289,6 +289,20 @@ class ChatBotCobranza {
 
       const respuesta = this.generarRespuesta(telParaConv, texto);
 
+      // Hook: registrar la respuesta del cliente (para Google Sheets)
+      if (typeof this.onRespuesta === 'function') {
+        try {
+          const cli = this.obtenerCliente(telParaConv);
+          const conv = this.conversaciones.get(telParaConv);
+          this.onRespuesta({
+            telefono: telParaConv,
+            nombre: (cli && !cli.desconocido) ? cli.nombre : '',
+            mensaje: texto,
+            tipo: (conv && conv.estado) ? conv.estado : 'sin_identificar'
+          });
+        } catch (e) {}
+      }
+
       if (respuesta) {
         await this.whatsapp.sock.sendMessage(jid, { text: respuesta });
         this.registrarInteraccion(telParaConv, 'enviado', respuesta.substring(0, 50), jid);
