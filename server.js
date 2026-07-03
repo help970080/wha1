@@ -28,6 +28,7 @@ const EMPRESA = require('./config/empresa');
 const WhatsAppService = require('./services/whatsappServiceBaileys');
 const EnvioMasivoService = require('./services/envioMasivoService');
 const ChatBotCobranza = require('./services/chatbotCobranza');
+const cobrapro = require('./services/cobraproService');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1073,6 +1074,31 @@ app.get('/api/cartera', (req, res) => {
   }
 });
 
+// ─── COBRAPRO (solo lectura): agencias y morosos ───
+app.get('/api/cobrapro/agencias', async (req, res) => {
+  try {
+    if (!cobrapro.configurado()) return res.json({ exito: false, mensaje: 'CobraPro no configurado (faltan COBRAPRO_USER/COBRAPRO_PASS en Render).', agencias: [] });
+    const agencias = await cobrapro.listarAgencias();
+    res.json({ exito: true, agencias });
+  } catch (e) {
+    res.status(500).json({ exito: false, mensaje: e.message, agencias: [] });
+  }
+});
+
+app.post('/api/cobrapro/morosos', async (req, res) => {
+  try {
+    const tenantId = req.body.tenantId;
+    if (tenantId == null) return res.status(400).json({ exito: false, mensaje: 'Falta tenantId (agencia)' });
+    const incluirTodos = req.body.incluirTodos !== false;
+    const datos = await cobrapro.getMorosos(tenantId, { incluirTodos });
+    // Cargar también al chatbot para que reconozca al cliente cuando responda
+    if (datos.length && chatbot && chatbot.cargarCartera) chatbot.cargarCartera(datos);
+    res.json({ exito: true, total: datos.length, datos });
+  } catch (e) {
+    res.status(500).json({ exito: false, mensaje: e.message, datos: [] });
+  }
+});
+
 // Panel Super Admin (HTML)
 app.get('/superadmin', (req, res) => {
   res.sendFile(path.join(__dirname, 'superadmin.html'));
@@ -1291,6 +1317,16 @@ function getPanelHTML() {
         </div>
         <input type="file" id="fileInput" accept=".xlsx,.xls,.csv" style="display:none" onchange="subirArchivo(this)">
         <div id="fileResult" class="hidden" style="margin-top:12px;"></div>
+
+        <div style="margin-top:14px;border-top:1px solid var(--border,#28375c);padding-top:12px;">
+          <p style="font-size:0.8rem;color:var(--muted);margin:0 0 8px;">🏢 …o jala morosos directo de CobraPro:</p>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+            <select id="cpAgencia" style="flex:1;min-width:160px;"><option value="">Cargar agencias…</option></select>
+            <button class="btn" onclick="cpCargarAgencias()">↻ Agencias</button>
+            <button class="btn btn-green" onclick="cpTraerMorosos()">📥 Traer morosos</button>
+          </div>
+          <div id="cpMsg" style="font-size:0.75rem;color:var(--muted);margin-top:6px;"></div>
+        </div>
       </div>
       
       <!-- Campaña -->
@@ -1796,6 +1832,63 @@ async function restaurarCartera(force) {
       if (btn) btn.disabled = false;
     }
   } catch (e) {}
+}
+
+// ═══════════════════════════════════
+// COBRAPRO: agencias + traer morosos
+// ═══════════════════════════════════
+async function cpCargarAgencias() {
+  const sel = document.getElementById('cpAgencia');
+  const msg = document.getElementById('cpMsg');
+  if (!sel) return;
+  msg.textContent = 'Consultando agencias…';
+  try {
+    const r = await fetch('/api/cobrapro/agencias');
+    const d = await r.json();
+    if (!d.exito) { msg.textContent = '⚠️ ' + (d.mensaje || 'No disponible'); return; }
+    if (!d.agencias.length) { msg.textContent = 'Sin agencias.'; return; }
+    sel.innerHTML = '<option value="">— Elige agencia —</option>';
+    d.agencias.forEach(function(a){
+      const o = document.createElement('option');
+      o.value = a.id;
+      o.textContent = a.nombre + (a.clientes != null ? ' (' + a.clientes + ' clientes)' : '');
+      sel.appendChild(o);
+    });
+    msg.textContent = d.agencias.length + ' agencias. Elige una y presiona "Traer morosos".';
+  } catch (e) { msg.textContent = 'Error: ' + e.message; }
+}
+
+async function cpTraerMorosos() {
+  const sel = document.getElementById('cpAgencia');
+  const msg = document.getElementById('cpMsg');
+  const tenantId = sel ? sel.value : '';
+  if (!tenantId) { msg.textContent = 'Primero elige una agencia.'; return; }
+  msg.textContent = 'Trayendo morosos de CobraPro…';
+  try {
+    const r = await fetch('/api/cobrapro/morosos', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tenantId: isNaN(+tenantId) ? tenantId : +tenantId })
+    });
+    const d = await r.json();
+    if (!d.exito) { msg.textContent = '⚠️ ' + (d.mensaje || 'Error'); return; }
+    if (!d.datos.length) { msg.textContent = 'La agencia no devolvió morosos con teléfono.'; return; }
+    contactosCargados = d.datos;
+    const result = document.getElementById('fileResult');
+    if (result) {
+      result.classList.remove('hidden');
+      let html = '<span class="tag tag-ok">✅ ' + d.datos.length + ' morosos de CobraPro</span>';
+      html += '<table class="preview-table"><tr><th>NOMBRE</th><th>SALDO</th><th>DIAS</th><th>TELEFONO</th></tr>';
+      d.datos.slice(0, 3).forEach(function(c){
+        html += '<tr><td>' + (c.nombre || '') + '</td><td>' + (c.saldo || 0) + '</td><td>' + (c.diasAtraso || 0) + '</td><td>' + (c.telefono || '') + '</td></tr>';
+      });
+      html += '</table>';
+      result.innerHTML = html;
+    }
+    const btn = document.getElementById('btnIniciar');
+    if (btn) btn.disabled = false;
+    msg.textContent = '✅ ' + d.datos.length + ' morosos cargados. Selecciona y manda por bloques.';
+  } catch (e) { msg.textContent = 'Error: ' + e.message; }
 }
 
 // ═══════════════════════════════════
