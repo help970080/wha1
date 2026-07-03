@@ -29,6 +29,7 @@ const WhatsAppService = require('./services/whatsappServiceBaileys');
 const EnvioMasivoService = require('./services/envioMasivoService');
 const ChatBotCobranza = require('./services/chatbotCobranza');
 const cobrapro = require('./services/cobraproService');
+const sheets = require('./services/sheetsService');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -295,6 +296,12 @@ app.post('/api/campana/iniciar', upload.single('imagen'), async (req, res) => {
     } else if (req.body.imagenUrl) {
       imagen = req.body.imagenUrl;
     }
+
+    // Registrar en Google Sheets cada envío exitoso (agencia = acreedora activa)
+    const agenciaSheet = EMPRESA.empresaNombre;
+    envioMasivoService.onEnviado = function (c) {
+      sheets.registrarEnviados(agenciaSheet, nombreCampana || '', [c]).catch(function () {});
+    };
 
     const resultado = await envioMasivoService.iniciarCampana({
       contactos,
@@ -1074,6 +1081,18 @@ app.get('/api/cartera', (req, res) => {
   }
 });
 
+// ─── GOOGLE SHEETS: ya-enviados de la acreedora activa ───
+app.get('/api/enviados', async (req, res) => {
+  try {
+    if (!sheets.configurado()) return res.json({ ok: false, mensaje: 'Sheets no configurado', detalle: {}, telefonos: [] });
+    const agencia = EMPRESA.empresaNombre;
+    const data = await sheets.getEnviados(agencia);
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ ok: false, mensaje: e.message, detalle: {}, telefonos: [] });
+  }
+});
+
 // ─── COBRAPRO (solo lectura): agencias y morosos ───
 app.get('/api/cobrapro/agencias', async (req, res) => {
   try {
@@ -1702,19 +1721,9 @@ async function subirArchivo(input) {
     const r = await fetch('/api/subir-excel', { method:'POST', body:fd });
     const d = await r.json();
     if (d.exito) {
-      contactosCargados = d.datos;
-      let html = '<span class="tag tag-ok">✅ ' + d.totalRegistros + ' contactos</span>';
-      html += '<table class="preview-table"><tr>';
-      d.columnas.slice(0,5).forEach(c => html += '<th>' + c + '</th>');
-      html += '</tr>';
-      (d.preview || []).slice(0,3).forEach(row => {
-        html += '<tr>';
-        d.columnas.slice(0,5).forEach(c => html += '<td>' + (row[c]||'') + '</td>');
-        html += '</tr>';
-      });
-      html += '</table>';
-      result.innerHTML = html;
       document.getElementById('fileDrop').classList.add('active');
+      // Pintar desde la cartera YA normalizada del bot (evita problemas de encabezados)
+      await restaurarCartera(true);
       cargarEstado();
     } else {
       result.innerHTML = '<span class="tag tag-err">❌ ' + d.mensaje + '</span>';
@@ -1739,14 +1748,15 @@ drop.addEventListener('drop', e => {
 // CAMPAÑA
 // ═══════════════════════════════════
 async function iniciarCampana() {
-  await restaurarCartera(true); // fuente de verdad: cartera normalizada del bot (evita problemas de encabezados)
-  if (!contactosCargados?.length) return alert('Primero carga un Excel');
+  if (!contactosCargados?.length) await restaurarCartera(true);
+  const seleccion = getSeleccionados();
+  if (!seleccion.length) return alert('No hay contactos seleccionados. Marca al menos uno.');
   const plantilla = document.getElementById('campPlantilla').value.trim();
   const imgInput = document.getElementById('campImagen');
   if (!plantilla && !imgInput.files[0]) return alert('Escribe un mensaje o selecciona imagen');
   
   const fd = new FormData();
-  fd.append('contactos', JSON.stringify(contactosCargados));
+  fd.append('contactos', JSON.stringify(seleccion));
   fd.append('plantilla', plantilla);
   fd.append('nombreCampana', document.getElementById('campNombre').value || 'Campaña ' + new Date().toLocaleDateString('es-MX'));
   fd.append('config', JSON.stringify({
@@ -1810,27 +1820,79 @@ function cargarPlantillas() {
 
 // Recupera la cartera ya cargada en el bot (normalizada) para la campaña.
 // force=true la refresca aunque ya haya algo cargado (fuente de verdad = el bot).
+// Pinta la lista de contactos con CHECKBOXES y estatus "✓ Enviado".
+// Consulta a Google Sheets los ya-enviados de la acreedora activa.
+async function pintarLista(datos) {
+  contactosCargados = (datos || []).map(function(c){
+    return {
+      nombre: c.nombre || c.Cliente || c.NOMBRE || 'Cliente',
+      telefono: String(c.telefono || c.Telefono || c['Teléfono'] || c.TELEFONO || '').replace(/\D/g,'').slice(-10),
+      saldo: c.saldo != null ? c.saldo : (c.Saldo != null ? c.Saldo : (c.SALDO != null ? c.SALDO : 0)),
+      diasAtraso: c.diasAtraso != null ? c.diasAtraso : 0
+    };
+  }).filter(function(c){ return c.telefono.length === 10; });
+
+  const result = document.getElementById('fileResult');
+  if (!result) return;
+  result.classList.remove('hidden');
+  result.innerHTML = '<span class="tag tag-wait">Revisando ya-enviados…</span>';
+
+  let enviados = {};
+  try {
+    const r = await fetch('/api/enviados');
+    const d = await r.json();
+    if (d && d.detalle) enviados = d.detalle;
+  } catch (e) {}
+
+  let html = '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">';
+  html += '<span class="tag tag-ok">' + contactosCargados.length + ' contactos</span>';
+  html += '<button type="button" class="btn" onclick="selTodos(true)">Todos</button>';
+  html += '<button type="button" class="btn" onclick="selSoloNuevos()">Solo nuevos</button>';
+  html += '<button type="button" class="btn" onclick="selTodos(false)">Ninguno</button>';
+  html += '<span id="selCount" style="font-size:0.78rem;color:var(--muted);margin-left:auto;"></span></div>';
+  html += '<div style="max-height:280px;overflow:auto;border:1px solid #28375c;border-radius:8px;">';
+  html += '<table class="preview-table" style="width:100%;font-size:0.8rem;"><tr><th style="width:28px;"></th><th>NOMBRE</th><th>SALDO</th><th>TEL</th><th>ESTATUS</th></tr>';
+  contactosCargados.forEach(function(c, i){
+    const ya = enviados[c.telefono];
+    const checked = ya ? '' : 'checked';
+    const estatus = ya
+      ? '<span style="color:#e0a83a;">✓ Enviado ' + (ya.ultimo || '') + (ya.veces > 1 ? ' (x' + ya.veces + ')' : '') + '</span>'
+      : '<span style="color:#2ecc71;">nuevo</span>';
+    html += '<tr><td><input type="checkbox" class="selCb" data-i="' + i + '" ' + checked + ' onchange="actualizarSel()"></td>' +
+            '<td>' + c.nombre + '</td><td>' + c.saldo + '</td><td>' + c.telefono + '</td><td>' + estatus + '</td></tr>';
+  });
+  html += '</table></div>';
+  result.innerHTML = html;
+  actualizarSel();
+  const btn = document.getElementById('btnIniciar');
+  if (btn) btn.disabled = contactosCargados.length === 0;
+}
+
+function selTodos(v) { document.querySelectorAll('.selCb').forEach(function(cb){ cb.checked = v; }); actualizarSel(); }
+function selSoloNuevos() {
+  document.querySelectorAll('.selCb').forEach(function(cb){
+    const row = cb.closest('tr');
+    cb.checked = !!(row && row.textContent.indexOf('nuevo') >= 0);
+  });
+  actualizarSel();
+}
+function actualizarSel() {
+  const n = document.querySelectorAll('.selCb:checked').length;
+  const el = document.getElementById('selCount');
+  if (el) el.textContent = n + ' seleccionados';
+}
+function getSeleccionados() {
+  const idx = [].slice.call(document.querySelectorAll('.selCb:checked')).map(function(cb){ return +cb.dataset.i; });
+  return idx.map(function(i){ return contactosCargados[i]; }).filter(Boolean);
+}
+
+// Recupera la cartera del bot (normalizada) y la pinta seleccionable
 async function restaurarCartera(force) {
   if (!force && contactosCargados && contactosCargados.length) return;
   try {
     const r = await fetch('/api/cartera');
     const d = await r.json();
-    if (d.exito && d.datos && d.datos.length) {
-      contactosCargados = d.datos;
-      const result = document.getElementById('fileResult');
-      if (result) {
-        result.classList.remove('hidden');
-        let html = '<span class="tag tag-ok">✅ ' + d.datos.length + ' contactos (cargados en el bot)</span>';
-        html += '<table class="preview-table"><tr><th>NOMBRE</th><th>SALDO</th><th>DIAS</th><th>TELEFONO</th></tr>';
-        d.datos.slice(0, 3).forEach(function(c){
-          html += '<tr><td>' + (c.nombre || '') + '</td><td>' + (c.saldo || 0) + '</td><td>' + (c.diasAtraso || 0) + '</td><td>' + (c.telefono || '') + '</td></tr>';
-        });
-        html += '</table>';
-        result.innerHTML = html;
-      }
-      const btn = document.getElementById('btnIniciar');
-      if (btn) btn.disabled = false;
-    }
+    if (d.exito && d.datos && d.datos.length) await pintarLista(d.datos);
   } catch (e) {}
 }
 
@@ -1873,21 +1935,8 @@ async function cpTraerMorosos() {
     const d = await r.json();
     if (!d.exito) { msg.textContent = '⚠️ ' + (d.mensaje || 'Error'); return; }
     if (!d.datos.length) { msg.textContent = 'La agencia no devolvió morosos con teléfono.'; return; }
-    contactosCargados = d.datos;
-    const result = document.getElementById('fileResult');
-    if (result) {
-      result.classList.remove('hidden');
-      let html = '<span class="tag tag-ok">✅ ' + d.datos.length + ' morosos de CobraPro</span>';
-      html += '<table class="preview-table"><tr><th>NOMBRE</th><th>SALDO</th><th>DIAS</th><th>TELEFONO</th></tr>';
-      d.datos.slice(0, 3).forEach(function(c){
-        html += '<tr><td>' + (c.nombre || '') + '</td><td>' + (c.saldo || 0) + '</td><td>' + (c.diasAtraso || 0) + '</td><td>' + (c.telefono || '') + '</td></tr>';
-      });
-      html += '</table>';
-      result.innerHTML = html;
-    }
-    const btn = document.getElementById('btnIniciar');
-    if (btn) btn.disabled = false;
-    msg.textContent = '✅ ' + d.datos.length + ' morosos cargados. Selecciona y manda por bloques.';
+    await pintarLista(d.datos);
+    msg.textContent = '✅ ' + d.datos.length + ' morosos cargados. Marca los que quieras y manda por bloques.';
   } catch (e) { msg.textContent = 'Error: ' + e.message; }
 }
 
