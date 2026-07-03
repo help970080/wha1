@@ -1039,22 +1039,22 @@ const PLANTILLAS_GESTION = [
   {
     id: 'recordatorio',
     label: 'Recordatorio',
-    texto: '📋 *{despacho} — Cobranza*\n\nEstimado(a) {nombre}, le recordamos que su cuenta presenta un adeudo de *{saldo}* con *{dias} días* de atraso.\n\nRegularice su situación y evite cargos adicionales. Responda a este mensaje para conocer sus opciones de pago. 🙏'
+    texto: '📋 *{despacho} — Cobranza*\n\nEstimado(a) {nombre}, le contactamos en representación de *{acreedor}*, su acreedor. Su cuenta presenta un adeudo de *{saldo}* con *{dias} días* de atraso.\n\nRegularice su situación y evite cargos adicionales. Responda a este mensaje para conocer sus opciones de pago. 🙏'
   },
   {
     id: 'urgente',
     label: 'Urgente',
-    texto: '⚠️ *AVISO URGENTE — {despacho}*\n\n{nombre}, su adeudo de *{saldo}* tiene *{dias} días* de atraso. Este es un *aviso de última oportunidad* para regularizar antes de que su cuenta escale.\n\nResponda a este mensaje HOY para acceder a un convenio de pagos. ⏰'
+    texto: '⚠️ *AVISO URGENTE — {despacho}*\n\n{nombre}, le contactamos en representación de *{acreedor}*, su acreedor. Su adeudo de *{saldo}* tiene *{dias} días* de atraso. Este es un *aviso de última oportunidad* para regularizar antes de que su cuenta escale.\n\nResponda a este mensaje HOY para acceder a un convenio de pagos. ⏰'
   },
   {
     id: 'judicial',
     label: 'Judicial',
-    texto: '🚨 *COBRANZA JUDICIAL EN PROCESO*\n\n{nombre}, su cuenta con adeudo de *{saldo}* ({dias} días de atraso) está por turnarse a cobranza legal.\n\nAún puede evitarlo. Responda a este mensaje de inmediato para pactar un convenio de pago.\n\n— {despacho}'
+    texto: '🚨 *COBRANZA JUDICIAL EN PROCESO*\n\n{nombre}, en representación de *{acreedor}*, su acreedor, le informamos que su cuenta con adeudo de *{saldo}* ({dias} días de atraso) está por turnarse a cobranza legal.\n\nAún puede evitarlo. Responda a este mensaje de inmediato para pactar un convenio de pago.\n\n— {despacho}'
   },
   {
     id: 'convenio',
     label: 'Convenio (con link)',
-    texto: '🤝 *{despacho} — Propuesta de Convenio*\n\n{nombre}, podemos regularizar su adeudo de *{saldo}* con un plan de pagos accesible.\n\n📄 Convenio: {convenio}\n\nResponda a este mensaje y le comparto las opciones (Plan Rápido o Plan Accesible). 🙏'
+    texto: '🤝 *{despacho} — Propuesta de Convenio*\n\n{nombre}, le contactamos en representación de *{acreedor}*, su acreedor. Podemos regularizar su adeudo de *{saldo}* con un plan de pagos accesible.\n\n📄 Convenio: {convenio}\n\nResponda a este mensaje y le comparto las opciones (Plan Rápido o Plan Accesible). 🙏'
   }
 ];
 
