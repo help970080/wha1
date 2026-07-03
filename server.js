@@ -217,6 +217,19 @@ app.post('/api/desconectar', async (req, res) => {
 // ═══════════════════════════════════════════════════════════
 
 // Subir Excel y previsualizar
+// Detecta la columna de días de atraso sin importar el encabezado
+// (DIAS, dias, "dias de atraso", "Días Atraso", DIASATRASO, etc.)
+function _diasDeFila(row) {
+  for (const k of Object.keys(row)) {
+    const kn = k.toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    if (kn.includes('dia')) {
+      const n = parseInt(String(row[k]).replace(/[^\d-]/g, ''));
+      if (!isNaN(n)) return n;
+    }
+  }
+  return 0;
+}
+
 app.post('/api/subir-excel', upload.single('archivo'), (req, res) => {
   try {
     if (!req.file) {
@@ -237,7 +250,7 @@ app.post('/api/subir-excel', upload.single('archivo'), (req, res) => {
         nombre: row.nombre || row.Nombre || row.Cliente || row.NOMBRE || 'Cliente',
         telefono: row.telefono || row.Telefono || row.Teléfono || row.TELEFONO || '',
         saldo: parseFloat(row.saldo ?? row.Saldo ?? row.SALDO ?? 0) || 0,
-        diasAtraso: parseInt(row.diasAtraso ?? row.DiasAtraso ?? row['Días Atraso'] ?? row.DIASATRASO ?? 0) || 0
+        diasAtraso: _diasDeFila(row)
       };
       return obj;
     }).filter(c => c.telefono);
