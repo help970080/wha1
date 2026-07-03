@@ -99,9 +99,11 @@ function _diasDesde(fechaMx) {
   return d > 0 ? d : 0;
 }
 
-// 4) Traer morosos de una agencia (contactos ∪ saldo>0), deduplicado
+// 4) Traer morosos de una agencia. Por defecto SOLO Contactos = no-pagadores
+// de la semana ANTERIOR (definición real de moroso). incluirTodos=true suma
+// además el universo saldo>0 (opcional, puede traer clientes al corriente).
 async function getMorosos(tenantId, opts = {}) {
-  const incluirTodos = opts.incluirTodos !== false; // por defecto suma /api/clients (saldo>0)
+  const incluirTodos = opts.incluirTodos === true; // por defecto NO (solo Contactos)
   const tok = await _tokenTenant(tenantId);
   const H = { Authorization: 'Bearer ' + tok };
   const porTel = new Map();
