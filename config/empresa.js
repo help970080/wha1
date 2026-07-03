@@ -73,21 +73,22 @@ const DEFAULTS = {
       }
     },
 
-    // CREDI YA <<< configúrala desde el panel (o llena estos DEFAULTS).
+    // CREDI YA (datos reales)
     crediya: {
       id: 'crediya',
       nombre: 'CREDI YA',
-      acreedorLegal: 'CREDI YA [RAZON SOCIAL S.A. DE C.V.]',   // <<< razon social real
+      acreedorLegal: 'CREDI YA, S.A. DE C.V.',
       folioPrefijo: 'CRY',
       datosBancarios: {
-        spinOxxo: { nombre: 'SPIN - OXXO',    clabe: 'XXXX XXXX XXXX XXXX XX', tarjeta: 'XXXX XXXX XXXX XXXX' }, // <<<
-        bbva:     { nombre: 'BBVA - BANCOMER', clabe: 'XXXX XXXX XXXX XXXX XX', tarjeta: 'XXXX XXXX XXXX XXXX' }, // <<<
-        titular:  '[TITULAR DE LAS CUENTAS]'   // <<<
+        // Banco Azteca (única cuenta, solo tarjeta). El slot vacío se omite al mostrar.
+        spinOxxo: { nombre: 'BANCO AZTECA', clabe: '', tarjeta: '5343 8102 7949 3388' },
+        bbva:     { nombre: '', clabe: '', tarjeta: '' },
+        titular:  'Lic. Johny López'
       },
       convenio: {
         planA_monto: 1000, planB_monto: 500,
         semanasSinRecargo: 4, recargo: 0.15, umbralPagoUnico: 4000,
-        urlConvenio: 'https://convenios.celexpress.org/LGX_Convenios.html'  // <<<
+        urlConvenio: 'https://convenios.celexpress.org/LGX_Convenios.html'
       }
     }
 
