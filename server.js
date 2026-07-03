@@ -1089,7 +1089,7 @@ app.post('/api/cobrapro/morosos', async (req, res) => {
   try {
     const tenantId = req.body.tenantId;
     if (tenantId == null) return res.status(400).json({ exito: false, mensaje: 'Falta tenantId (agencia)' });
-    const incluirTodos = req.body.incluirTodos !== false;
+    const incluirTodos = req.body.incluirTodos === true; // por defecto solo Contactos (semana anterior)
     const datos = await cobrapro.getMorosos(tenantId, { incluirTodos });
     // Cargar también al chatbot para que reconozca al cliente cuando responda
     if (datos.length && chatbot && chatbot.cargarCartera) chatbot.cargarCartera(datos);
