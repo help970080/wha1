@@ -37,8 +37,8 @@ async function registrarEnviados(agencia, campana, registros) {
 }
 
 // Registrar una respuesta de cliente (fase 2)
-async function registrarRespuesta(agencia, telefono, nombre, mensaje) {
-  return _post({ accion: 'respuesta', agencia, telefono, nombre, mensaje });
+async function registrarRespuesta(agencia, telefono, nombre, mensaje, tipo) {
+  return _post({ accion: 'respuesta', agencia, telefono, nombre, mensaje, tipo });
 }
 
 // Consultar los ya-enviados de una agencia -> { ok, telefonos:[], detalle:{ tel:{nombre,ultimo,veces} } }
