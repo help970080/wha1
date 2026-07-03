@@ -51,6 +51,11 @@ const whatsappService = new WhatsAppService();
 const chatbot = new ChatBotCobranza(whatsappService);
 const envioMasivoService = new EnvioMasivoService(whatsappService, chatbot);
 
+// Registrar en Google Sheets cada respuesta de cliente (agencia = acreedora activa)
+chatbot.onRespuesta = function (d) {
+  sheets.registrarRespuesta(EMPRESA.empresaNombre, d.telefono, d.nombre, d.mensaje, d.tipo).catch(function () {});
+};
+
 let chatbotIniciado = false;
 
 // Auto-iniciar WhatsApp al arrancar
