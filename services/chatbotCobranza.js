@@ -568,21 +568,20 @@ _Esto nos ayuda a evitar errores y proteger su información._`;
   // ═══════════════════════════════════════
 
   getDatosBancarios(referencia) {
-    const b = this.datosBancarios;
-    return `━━━━━━━━━━━━━━━━━━━━━
-🏪 *${b.spinOxxo.nombre}*
-━━━━━━━━━━━━━━━━━━━━━
-📋 CLABE: *${b.spinOxxo.clabe}*
-💳 Tarjeta: *${b.spinOxxo.tarjeta}*
-
-━━━━━━━━━━━━━━━━━━━━━
-🏦 *${b.bbva.nombre}*
-━━━━━━━━━━━━━━━━━━━━━
-📋 CLABE: *${b.bbva.clabe}*
-💳 Tarjeta: *${b.bbva.tarjeta}*
-
-👤 A nombre de: *${b.titular}*
-📝 Referencia: *${referencia}*`;
+    const b = this.datosBancarios || {};
+    let out = '';
+    for (const key of Object.keys(b)) {
+      if (key === 'titular') continue;
+      const cuenta = b[key];
+      if (!cuenta || (!cuenta.clabe && !cuenta.tarjeta)) continue; // omite cuentas vacías
+      const icono = /oxxo|spin/i.test(cuenta.nombre || '') ? '🏪' : '🏦';
+      out += `━━━━━━━━━━━━━━━━━━━━━\n${icono} *${cuenta.nombre || 'Cuenta'}*\n━━━━━━━━━━━━━━━━━━━━━\n`;
+      if (cuenta.clabe)   out += `📋 CLABE: *${cuenta.clabe}*\n`;
+      if (cuenta.tarjeta) out += `💳 Tarjeta: *${cuenta.tarjeta}*\n`;
+      out += `\n`;
+    }
+    out += `👤 A nombre de: *${b.titular || ''}*\n📝 Referencia: *${referencia}*`;
+    return out;
   }
 
   // ═══════════════════════════════════════
@@ -1420,6 +1419,8 @@ _Cobranza Mercantil Especializada_`
 
 Sr(a). *${nombre}* 👋
 
+_Le contactamos en representación de *${EMPRESA.empresaNombre}*, su acreedor._
+
 ┌─────────────────────────
 │ 💰 Saldo: *${this.fmt(saldo)}*
 │ 📅 Atraso: *${dias} días*
@@ -1451,6 +1452,8 @@ _Cobranza Mercantil Especializada_`;
     return `${header}
 
 Sr(a). *${nombre}* 👋
+
+_Le contactamos en representación de *${EMPRESA.empresaNombre}*, su acreedor._
 
 ┌─────────────────────────
 │ 💰 Saldo: *${this.fmt(saldo)}*
