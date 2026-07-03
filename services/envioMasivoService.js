@@ -578,6 +578,11 @@ class EnvioMasivoService {
       this.stats.ultimoEnvio = Date.now();
       this.config.enviadosHoy++;
 
+      // Hook: notificar envío exitoso (para registrar en Google Sheets)
+      if (typeof this.onEnviado === 'function') {
+        try { this.onEnviado({ telefono: telefono, nombre: contacto.nombre, saldo: contacto.saldo, diasAtraso: contacto.diasAtraso }); } catch (e) {}
+      }
+
       // Mapear TODOS los IDs posibles al teléfono real
       if (this.chatbot) {
         // El JID que usamos para enviar (normalmente @s.whatsapp.net)
