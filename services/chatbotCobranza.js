@@ -314,6 +314,16 @@ class ChatBotCobranza {
     // 2. LID ya mapeado previamente
     if (this.lidMap.has(telefono)) return this.lidMap.get(telefono);
 
+    // 2b. LID aprendido por el servicio de WhatsApp (al ENVIAR la campaña o al recibir).
+    //     El servicio y el chatbot tienen mapas separados; aquí los unimos.
+    if (this.whatsapp && this.whatsapp.lidMap && this.whatsapp.lidMap.has(telefono)) {
+      const tel = String(this.whatsapp.lidMap.get(telefono));
+      const t10 = tel.replace(/\D/g, '').slice(-10);
+      const dest = this.clientes.has(tel) ? tel : t10;
+      this.lidMap.set(telefono, dest); // cachea en el chatbot (persistente)
+      return dest;
+    }
+
     // 3. Últimos 10 dígitos
     const tel10 = telefono.replace(/\D/g, '').slice(-10);
     if (tel10.length === 10 && this.clientes.has(tel10)) {
@@ -1666,6 +1676,15 @@ ${urgente ? '⏰ *Su caso es urgente, no demore.*' : 'O escriba *HOLA* para rein
       if (cliente) return cliente;
     }
 
+    // 2b. Vía lidMap del servicio de WhatsApp (aprendido al enviar/recibir)
+    if (this.whatsapp && this.whatsapp.lidMap) {
+      const tel = this.whatsapp.lidMap.get(telefono);
+      if (tel) {
+        const c = this.clientes.get(tel) || this.clientes.get(String(tel).replace(/\D/g, '').slice(-10));
+        if (c) return c;
+      }
+    }
+
     // 3. Buscar con últimos 10 dígitos
     const tel10 = telefono.replace(/\D/g, '').slice(-10);
     cliente = this.clientes.get(tel10);
@@ -1789,6 +1808,11 @@ ${urgente ? '⏰ *Su caso es urgente, no demore.*' : 'O escriba *HOLA* para rein
         if (resultado?.exists && resultado.jid) {
           const lid = resultado.jid.replace('@s.whatsapp.net', '').replace('@lid', '');
           this.lidMap.set(lid, tel);
+          // Capturar también el LID de privacidad real si viene aparte
+          if (resultado.lid) {
+            const l2 = String(resultado.lid).replace('@lid', '').replace('@s.whatsapp.net', '');
+            if (l2 && l2 !== lid) this.lidMap.set(l2, tel);
+          }
           console.log(`   🔗 ${cli.nombre}: ${lid} → ${tel}`);
         }
       } catch (e) {}
