@@ -40,6 +40,7 @@ class ChatBotCobranza {
     this.clientes = new Map();
     this.conversaciones = new Map();
     this.lidMap = new Map(); // LID → teléfono real
+    this.ultimoJid = new Map(); // teléfono → JID real de la conversación (para enviar PDF por el mismo canal)
     this.interacciones = [];
 
     // Auto-persistir lidMap: cada vez que se agrega/cambia un mapeo,
@@ -285,6 +286,7 @@ class ChatBotCobranza {
 
       const mapped = telParaConv !== telefono;
       console.log(`📨 [${telParaConv}${mapped ? ' ←LID:'+telefono : ''}] ${texto.substring(0, 50)}`);
+      this.ultimoJid.set(telParaConv, jid); // recordar el JID que SÍ funciona (para el PDF)
       this.registrarInteraccion(telParaConv, 'recibido', texto, jid);
 
       const respuesta = this.generarRespuesta(telParaConv, texto);
@@ -916,13 +918,15 @@ _${EMPRESA.footerCorto}_`;
       // largo o con asteriscos en documentos en algunas versiones).
       const caption = `Convenio Folio: ${folio}`;
 
-      // Enviar PDF
+      // Enviar PDF por el MISMO JID que funciona en la conversación (LID incluido)
+      const jidConversacion = this.ultimoJid.get(telefono) || null;
       const resultadoPDF = await this.whatsapp.enviarDocumento(
         telefono,
         buffer,
         fileName,
         'application/pdf',
-        caption
+        caption,
+        jidConversacion
       );
 
       if (!resultadoPDF.exito) {
