@@ -1,46 +1,93 @@
 /**
  * ═══════════════════════════════════════════════════════════
- * SERVICIO DE ENVÍO MASIVO - CON PROTECCIÓN ANTI-BANEO
- * CelExpress / LeGaXi Asesores
+ * SERVICIO DE ENVÍO MASIVO — v4.0
+ * CelExpress / LeGaXi Asociados
  * ═══════════════════════════════════════════════════════════
- * 
- * Funcionalidades:
- * - Envío masivo de texto personalizado ({nombre}, {saldo}, {dias})
- * - Envío de imagen estándar + texto
- * - Delays inteligentes (gaussianos) anti-baneo
- * - Typing simulation antes de cada mensaje
- * - Variación automática de mensajes (caracteres invisibles)
- * - Warm-up para números nuevos
- * - Monitoreo de salud / detección de riesgo de baneo
- * - Pausa/resume/cancelar en cualquier momento
- * - Estadísticas en tiempo real
- * - Horarios de envío configurables
+ *
+ * CAMBIOS CRÍTICOS vs v3.x:
+ *
+ *  1. TODO envío pasa por whatsapp.enviarMensaje() / enviarImagen().
+ *     ANTES: _enviarItem() llamaba sock.sendMessage() directo y se
+ *     saltaba el límite diario duro, la ventana horaria, el contador
+ *     persistente y la lista NO CONTACTAR del servicio.
+ *
+ *  2. ELIMINADOS los caracteres invisibles (\u200B \u200C \u200D \uFEFF).
+ *     Insertar zero-width chars para "variar" el mensaje es una firma
+ *     de spam conocida. No evade la detección: LA DISPARA. Se sustituye
+ *     por variación real de redacción (plantillas rotativas).
+ *
+ *  3. enHorarioPermitido() vuelve a funcionar. Antes era `return true`
+ *     y toda la ventana horaria era decorativa.
+ *
+ *  4. enviadosHoy delegado al servicio (persistente en disco, timezone
+ *     MX). Antes vivía en RAM y contaba en UTC: Render reiniciaba y el
+ *     contador volvía a 0; el día rotaba a las 6 PM hora de México.
+ *
+ *  5. Filtro NO CONTACTAR + deduplicación de teléfonos al armar la cola.
+ *
+ *  6. Validación de config server-side (el panel solo tiene min= en HTML).
+ *
+ *  7. Errores consecutivos → ABORTA la campaña. Antes pausaba 5 min y
+ *     seguía insistiendo contra un número ya restringido.
  */
 
-const fs = require('fs');
 const EMPRESA = require('../config/empresa');
-const path = require('path');
+
+// Límites duros. El panel NO puede bajar de aquí.
+const LIMITES = {
+  delayMinimo:        { min: 20000,  max: 600000 },
+  delayMaximo:        { min: 45000,  max: 900000 },
+  tamanoLote:         { min: 3,      max: 10 },
+  pausaEntreLotes:    { min: 180000, max: 3600000 },
+  pausaEntreLotesMax: { min: 300000, max: 7200000 },
+  limiteDiario:       { min: 5,      max: 60 },
+  horaInicio:         { min: 8,      max: 12 },
+  horaFin:            { min: 17,     max: 21 },
+};
 
 class EnvioMasivoService {
   constructor(whatsappService, chatbot) {
     this.whatsapp = whatsappService;
     this.chatbot = chatbot || null;
-    
-    // Estado del envío
+
     this.enviando = false;
     this.pausado = false;
     this.cancelado = false;
     this.campanaActiva = null;
-    
-    // Cola de mensajes
+
     this.cola = [];
     this.colaIndex = 0;
-    
-    // Estadísticas
-    this.stats = {
+
+    this.stats = this._statsVacias();
+
+    this.config = {
+      delayMinimo: 35000,
+      delayMaximo: 120000,
+      tamanoLote: 6,
+      pausaEntreLotes: 420000,      // 7 min
+      pausaEntreLotesMax: 900000,   // 15 min
+      limiteDiario: 45,
+      horaInicio: 9,
+      horaFin: 19,
+      sabadoHasta: 14,
+      domingo: false,
+      variarContenido: true,        // ahora = rotar redacción, NO zero-width
+    };
+
+    this.historial = [];
+    this.logEventos = [];
+
+    // Fallos consecutivos → abortar
+    this.fallosConsecutivos = 0;
+    this.maxFallosConsecutivos = 3;
+  }
+
+  _statsVacias() {
+    return {
       totalContactos: 0,
       enviados: 0,
       fallidos: 0,
+      omitidos: 0,
       pendientes: 0,
       enProgreso: false,
       pausado: false,
@@ -48,169 +95,76 @@ class EnvioMasivoService {
       ultimoEnvio: null,
       errores: [],
       campanaNombre: '',
-      velocidadPromedio: 0, // msgs/hora
-      tiempoEstimado: 0,   // minutos restantes
+      velocidadPromedio: 0,
+      tiempoEstimado: 0,
     };
-
-    // Configuración anti-baneo
-    this.config = {
-      // Delays entre mensajes (ms)
-      delayMinimo: 25000,       // 25 segundos mínimo
-      delayMaximo: 90000,       // 90 segundos máximo
-      delayPromedioBase: 45000, // 45 segundos promedio
-      
-      // Pausa entre lotes
-      tamanoLote: 8,            // mensajes por lote
-      pausaEntreLotes: 180000,  // 3 minutos entre lotes
-      pausaEntreLotesMax: 300000, // 5 minutos max
-      
-      // Límites diarios
-      limiteDiario: 45,         // máximo mensajes por día
-      enviadosHoy: 0,
-      fechaConteo: new Date().toDateString(),
-      
-      // Typing simulation
-      typingMinimo: 2000,       // 2 segundos
-      typingMaximo: 6000,       // 6 segundos
-      
-      // Horarios permitidos (hora local México)
-      horaInicio: 9,            // 9 AM
-      horaFin: 19,              // 7 PM (no molestar de noche)
-      
-      // Variación de contenido
-      variarContenido: true,
-    };
-
-    // Historial de campañas
-    this.historial = [];
-    
-    // Log en tiempo real (últimos 100 eventos)
-    this.logEventos = [];
-    
-    // Caracteres invisibles para variación
-    this.invisibles = [
-      '\u200B', // Zero-width space
-      '\u200C', // Zero-width non-joiner
-      '\u200D', // Zero-width joiner
-      '\uFEFF', // Zero-width no-break space
-    ];
   }
 
   // ═══════════════════════════════════════════════════════════
-  // DELAY INTELIGENTE (Distribución gaussiana)
+  // DELAYS
   // ═══════════════════════════════════════════════════════════
 
-  /**
-   * Genera un delay con distribución gaussiana (más "humano")
-   * En vez de delays uniformes, la mayoría serán cercanos al promedio
-   * con ocasionales delays más largos o cortos
-   */
   gaussianDelay(min, max) {
-    // Box-Muller transform para distribución normal
     let u = 0, v = 0;
     while (u === 0) u = Math.random();
     while (v === 0) v = Math.random();
     const normal = Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
-    
     const media = (min + max) / 2;
-    const desviacion = (max - min) / 6; // 99.7% dentro del rango
+    const desviacion = (max - min) / 6;
     let delay = media + normal * desviacion;
-    
-    // Clamp al rango
     delay = Math.max(min, Math.min(max, delay));
     return Math.round(delay);
   }
 
-  /**
-   * Delay entre mensajes individuales
-   */
   getDelayMensaje() {
     return this.gaussianDelay(this.config.delayMinimo, this.config.delayMaximo);
   }
 
-  /**
-   * Delay entre lotes (más largo)
-   */
   getDelayLote() {
     return this.gaussianDelay(this.config.pausaEntreLotes, this.config.pausaEntreLotesMax);
   }
 
-  /**
-   * Delay de typing antes de enviar
-   */
-  getDelayTyping() {
-    return this.gaussianDelay(this.config.typingMinimo, this.config.typingMaximo);
-  }
-
   // ═══════════════════════════════════════════════════════════
-  // VARIACIÓN DE CONTENIDO
+  // VARIACIÓN DE CONTENIDO (v4.0 — SIN zero-width)
   // ═══════════════════════════════════════════════════════════
 
   /**
-   * Agrega caracteres invisibles aleatorios para que cada mensaje
-   * sea técnicamente diferente (evita detección de contenido idéntico)
+   * Variación REAL: cambia la redacción, no mete basura invisible.
+   *
+   * Si mandas la misma frase 45 veces, WhatsApp la agrupa aunque le
+   * pegues un \u200B. Lo que sí ayuda es que el mensaje cambie de forma
+   * de verdad. Si tu plantilla trae "||" separa variantes y rota:
+   *
+   *   "Hola {nombre}, le recuerdo su pago.||{nombre}, buen día. Un
+   *    recordatorio de su pago pendiente.||Estimado {nombre}, le
+   *    escribo sobre su pago."
    */
-  variarTexto(texto) {
-    if (!this.config.variarContenido) return texto;
-    
-    const partes = texto.split(' ');
-    const posiciones = new Set();
-    
-    // Insertar 2-4 caracteres invisibles en posiciones aleatorias
-    const cantidad = 2 + Math.floor(Math.random() * 3);
-    for (let i = 0; i < cantidad; i++) {
-      posiciones.add(Math.floor(Math.random() * partes.length));
-    }
-    
-    return partes.map((p, i) => {
-      if (posiciones.has(i)) {
-        const inv = this.invisibles[Math.floor(Math.random() * this.invisibles.length)];
-        return p + inv;
-      }
-      return p;
-    }).join(' ');
+  elegirVariante(plantilla) {
+    if (!plantilla) return '';
+    if (!this.config.variarContenido) return plantilla;
+    if (!plantilla.includes('||')) return plantilla;
+    const variantes = plantilla.split('||').map(v => v.trim()).filter(Boolean);
+    if (!variantes.length) return plantilla;
+    return variantes[Math.floor(Math.random() * variantes.length)];
   }
 
-  /**
-   * Variaciones sutiles de puntuación
-   */
-  variarPuntuacion(texto) {
-    const variaciones = [
-      // A veces agrega/quita punto final
-      () => texto.endsWith('.') ? texto.slice(0, -1) : texto + '.',
-      // Dejar como está
-      () => texto,
-      // Agregar espacio al final
-      () => texto + ' ',
-    ];
-    return variaciones[Math.floor(Math.random() * variaciones.length)]();
-  }
-
-  /**
-   * Personaliza el mensaje con datos del contacto
-   */
   personalizarMensaje(plantilla, contacto) {
-    let mensaje = plantilla;
-    
-    // Reemplazar variables
+    let mensaje = this.elegirVariante(plantilla);
+
     mensaje = mensaje.replace(/\{nombre\}/gi, contacto.nombre || 'Cliente');
-    mensaje = mensaje.replace(/\{saldo\}/gi, 
+    mensaje = mensaje.replace(/\{saldo\}/gi,
       parseFloat(contacto.saldo || 0).toLocaleString('es-MX', { style: 'currency', currency: 'MXN' })
     );
     mensaje = mensaje.replace(/\{dias\}/gi, contacto.diasAtraso || '0');
     mensaje = mensaje.replace(/\{telefono\}/gi, contacto.telefono || '');
 
-    // Variables de la ACREEDORA ACTIVA (despacho fijo LeGaXi + acreedor + convenio)
     try {
       const cfg = EMPRESA.getConfig();
       mensaje = mensaje.replace(/\{convenio\}/gi, (cfg.convenio && cfg.convenio.urlConvenio) || '');
       mensaje = mensaje.replace(/\{despacho\}/gi, cfg.marca || '');
       mensaje = mensaje.replace(/\{acreedor\}/gi, cfg.empresaNombre || '');
-    } catch (e) { /* si config no disponible, se dejan tal cual */ }
-    
-    // Variación anti-detección
-    mensaje = this.variarTexto(mensaje);
-    
+    } catch (e) {}
+
     return mensaje;
   }
 
@@ -219,35 +173,74 @@ class EnvioMasivoService {
   // ═══════════════════════════════════════════════════════════
 
   /**
-   * Siempre permitido (sin restricción de horario)
+   * v4.0: RESTAURADA. En v3.x esto era literalmente `return true`,
+   * con horaInicio/horaFin configurados, mostrados en el panel y
+   * reportados en getEstadisticas() — puro adorno.
    */
   enHorarioPermitido() {
-    return true;
+    const ahora = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+    const h = ahora.getHours();
+    const dow = ahora.getDay();
+
+    if (dow === 0 && !this.config.domingo) return false;
+    if (dow === 6) return h >= this.config.horaInicio && h < this.config.sabadoHasta;
+    return h >= this.config.horaInicio && h < this.config.horaFin;
   }
 
   /**
-   * Verifica y resetea el contador diario si es un nuevo día
+   * v4.0: delega al servicio, que lo persiste en disco con timezone MX.
    */
   verificarLimiteDiario() {
-    const hoy = new Date().toDateString();
-    if (this.config.fechaConteo !== hoy) {
-      this.config.enviadosHoy = 0;
-      this.config.fechaConteo = hoy;
-    }
-    return this.config.enviadosHoy < this.config.limiteDiario;
+    const salud = typeof this.whatsapp.estadoSalud === 'function'
+      ? this.whatsapp.estadoSalud()
+      : null;
+    if (!salud) return true;
+    const tope = Math.min(this.config.limiteDiario, salud.limiteDiario);
+    return salud.enviadosHoy < tope;
+  }
+
+  getEnviadosHoy() {
+    const salud = typeof this.whatsapp.estadoSalud === 'function'
+      ? this.whatsapp.estadoSalud()
+      : null;
+    return salud ? salud.enviadosHoy : 0;
   }
 
   /**
-   * Calcula tiempo estimado restante
+   * Sanea la config que llega del panel. El HTML tiene min="10" pero
+   * eso es client-side: un POST directo a /api/campana/config puede
+   * mandar delayMinimo: 0.
    */
+  _sanearConfig(nueva) {
+    const out = {};
+    for (const [k, v] of Object.entries(nueva || {})) {
+      if (LIMITES[k]) {
+        const n = Number(v);
+        if (!Number.isFinite(n)) continue;
+        const clamped = Math.max(LIMITES[k].min, Math.min(LIMITES[k].max, n));
+        if (clamped !== n) {
+          console.log(`⚠️  config.${k}=${n} fuera de rango → ajustado a ${clamped}`);
+        }
+        out[k] = clamped;
+      } else if (k === 'variarContenido' || k === 'domingo') {
+        out[k] = !!v;
+      } else if (k === 'sabadoHasta') {
+        out[k] = Math.max(10, Math.min(18, Number(v) || 14));
+      }
+    }
+    if (out.delayMaximo != null && out.delayMinimo != null && out.delayMaximo <= out.delayMinimo) {
+      out.delayMaximo = out.delayMinimo * 2;
+      console.log(`⚠️  delayMaximo <= delayMinimo → ajustado a ${out.delayMaximo}`);
+    }
+    return out;
+  }
+
   calcularTiempoEstimado() {
     const pendientes = this.stats.pendientes;
     if (pendientes === 0 || this.stats.enviados === 0) return 0;
-    
     const transcurrido = Date.now() - this.stats.inicioEnvio;
     const promedioPorMsg = transcurrido / this.stats.enviados;
     const lotes = Math.ceil(pendientes / this.config.tamanoLote);
-    
     return Math.round((pendientes * promedioPorMsg + lotes * this.config.pausaEntreLotes) / 60000);
   }
 
@@ -255,15 +248,6 @@ class EnvioMasivoService {
   // ENVÍO MASIVO PRINCIPAL
   // ═══════════════════════════════════════════════════════════
 
-  /**
-   * Iniciar campaña de envío masivo
-   * @param {Object} campana - Configuración de la campaña
-   * @param {Array} campana.contactos - Lista de contactos [{nombre, telefono, saldo, diasAtraso}]
-   * @param {string} campana.plantilla - Texto con variables: {nombre}, {saldo}, {dias}
-   * @param {string} [campana.imagen] - Ruta o base64 de imagen estándar
-   * @param {string} [campana.nombreCampana] - Nombre identificador
-   * @param {Object} [campana.config] - Override de configuración
-   */
   async iniciarCampana(campana) {
     if (this.enviando && !this.pausado) {
       return { exito: false, mensaje: 'Ya hay un envío en progreso. Pausa o cancela primero.' };
@@ -271,6 +255,11 @@ class EnvioMasivoService {
 
     if (!this.whatsapp.isConnected()) {
       return { exito: false, mensaje: 'WhatsApp no está conectado' };
+    }
+
+    // v4.0: si el servicio está en modo pánico, no arrancar nada.
+    if (this.whatsapp.bloqueado) {
+      return { exito: false, mensaje: `Bloqueado por anti-baneo: ${this.whatsapp.motivoBloqueo}` };
     }
 
     if (!campana.contactos?.length) {
@@ -281,43 +270,55 @@ class EnvioMasivoService {
       return { exito: false, mensaje: 'Se requiere al menos un mensaje o imagen' };
     }
 
-    // Override de config si se proporcionó
     if (campana.config) {
-      Object.assign(this.config, campana.config);
+      Object.assign(this.config, this._sanearConfig(campana.config));
     }
 
-    // Preparar cola de envío
-    this.cola = campana.contactos.map((contacto, index) => ({
-      index,
-      contacto: {
-        nombre: contacto.nombre || contacto.Cliente || 'Cliente',
-        telefono: (contacto.telefono || contacto.Teléfono || contacto.Telefono || '').toString().replace(/\D/g, ''),
-        saldo: parseFloat(contacto.saldo || contacto.Saldo || 0),
-        diasAtraso: parseInt(contacto.diasAtraso || contacto['Días Atraso'] || contacto.dias || 0),
-      },
-      plantilla: campana.plantilla,
-      imagen: campana.imagen || null,
-      estado: 'pendiente', // pendiente, enviado, fallido, saltado
-      error: null,
-      enviadoEn: null,
-    }));
+    // ── Armar cola: normalizar → filtrar inválidos → dedup → NO CONTACTAR ──
+    const vistos = new Set();
+    let omitidosInvalidos = 0;
+    let omitidosDuplicados = 0;
+    let omitidosNoContactar = 0;
 
-    // Filtrar números inválidos
-    this.cola = this.cola.filter(item => {
-      const tel = item.contacto.telefono;
-      if (!tel || tel.length < 10) {
-        item.estado = 'saltado';
-        item.error = 'Número inválido';
-        return false;
+    this.cola = [];
+    for (const contacto of campana.contactos) {
+      const telRaw = (contacto.telefono || contacto['Teléfono'] || contacto.Telefono || contacto.TELEFONO || '').toString();
+      const tel = telRaw.replace(/\D/g, '');
+      const tel10 = tel.length >= 10 ? tel.slice(-10) : tel;
+
+      if (!tel10 || tel10.length < 10) { omitidosInvalidos++; continue; }
+      if (vistos.has(tel10)) { omitidosDuplicados++; continue; }
+      if (typeof this.whatsapp.estaNoContactar === 'function' && this.whatsapp.estaNoContactar(tel10)) {
+        omitidosNoContactar++;
+        continue;
       }
-      return true;
-    });
+      vistos.add(tel10);
 
-    // Reset estado
+      this.cola.push({
+        index: this.cola.length,
+        contacto: {
+          nombre: contacto.nombre || contacto.Cliente || 'Cliente',
+          telefono: tel10,
+          saldo: parseFloat(contacto.saldo || contacto.Saldo || 0),
+          diasAtraso: parseInt(contacto.diasAtraso || contacto['Días Atraso'] || contacto.dias || 0),
+        },
+        plantilla: campana.plantilla,
+        imagen: campana.imagen || null,
+        estado: 'pendiente',
+        error: null,
+        enviadoEn: null,
+      });
+    }
+
+    if (!this.cola.length) {
+      return { exito: false, mensaje: 'Ningún contacto quedó tras filtrar (inválidos/duplicados/no-contactar)' };
+    }
+
     this.colaIndex = 0;
     this.enviando = true;
     this.pausado = false;
     this.cancelado = false;
+    this.fallosConsecutivos = 0;
 
     this.campanaActiva = {
       nombre: campana.nombreCampana || `Campaña ${new Date().toLocaleDateString('es-MX')}`,
@@ -327,107 +328,105 @@ class EnvioMasivoService {
       tieneImagen: !!campana.imagen,
     };
 
-    this.stats = {
-      totalContactos: this.cola.length,
-      enviados: 0,
-      fallidos: 0,
-      pendientes: this.cola.length,
-      enProgreso: true,
-      pausado: false,
-      inicioEnvio: Date.now(),
-      ultimoEnvio: null,
-      errores: [],
-      campanaNombre: this.campanaActiva.nombre,
-      velocidadPromedio: 0,
-      tiempoEstimado: 0,
-    };
+    this.stats = this._statsVacias();
+    this.stats.totalContactos = this.cola.length;
+    this.stats.pendientes = this.cola.length;
+    this.stats.omitidos = omitidosInvalidos + omitidosDuplicados + omitidosNoContactar;
+    this.stats.enProgreso = true;
+    this.stats.inicioEnvio = Date.now();
+    this.stats.campanaNombre = this.campanaActiva.nombre;
 
     console.log('\n═══════════════════════════════════════════════════════════');
     console.log(`📤 CAMPAÑA INICIADA: ${this.campanaActiva.nombre}`);
-    console.log(`   📋 Contactos: ${this.cola.length}`);
-    console.log(`   💬 Plantilla: ${(campana.plantilla || '').substring(0, 50)}...`);
-    console.log(`   🖼️  Imagen: ${campana.imagen ? 'Sí' : 'No'}`);
-    console.log(`   ⏱️  Delay: ${this.config.delayMinimo/1000}s - ${this.config.delayMaximo/1000}s`);
-    console.log(`   📦 Lote: ${this.config.tamanoLote} msgs, pausa ${this.config.pausaEntreLotes/1000}s`);
+    console.log(`   📋 En cola: ${this.cola.length} (de ${campana.contactos.length} cargados)`);
+    console.log(`   🚫 Omitidos: ${omitidosInvalidos} inválidos · ${omitidosDuplicados} duplicados · ${omitidosNoContactar} en NO CONTACTAR`);
+    console.log(`   📊 Enviados hoy: ${this.getEnviadosHoy()} / ${this.config.limiteDiario}`);
+    console.log(`   ⏱️  Delay: ${this.config.delayMinimo / 1000}s - ${this.config.delayMaximo / 1000}s`);
+    console.log(`   📦 Lote: ${this.config.tamanoLote} msgs, pausa ${this.config.pausaEntreLotes / 1000}s`);
+    console.log(`   🕐 Horario: ${this.config.horaInicio}-${this.config.horaFin}h (sáb hasta ${this.config.sabadoHasta}h, dom ${this.config.domingo ? 'sí' : 'no'})`);
     console.log('═══════════════════════════════════════════════════════════\n');
 
-    // Iniciar procesamiento en background
     this._procesarCola();
 
     return {
       exito: true,
       mensaje: `Campaña iniciada: ${this.cola.length} contactos`,
       campana: this.campanaActiva.nombre,
-      tiempoEstimado: `~${Math.round(this.cola.length * 50 / 60)} minutos`,
+      omitidos: { invalidos: omitidosInvalidos, duplicados: omitidosDuplicados, noContactar: omitidosNoContactar },
+      tiempoEstimado: `~${Math.round((this.cola.length * ((this.config.delayMinimo + this.config.delayMaximo) / 2) + Math.ceil(this.cola.length / this.config.tamanoLote) * this.config.pausaEntreLotes) / 60000)} minutos`,
     };
   }
 
-  /**
-   * Loop principal de procesamiento de cola
-   */
   async _procesarCola() {
     let mensajesEnLote = 0;
 
     while (this.colaIndex < this.cola.length) {
-      // Verificar cancelación
       if (this.cancelado) {
-        console.log('🛑 Campaña cancelada');
         this._finalizarCampana('cancelada');
         return;
       }
 
-      // Verificar pausa
+      // v4.0: si el servicio entró en pánico (403/429), abortar YA.
+      if (this.whatsapp.bloqueado) {
+        console.log(`🛑 Servicio bloqueado (${this.whatsapp.motivoBloqueo}). Abortando campaña.`);
+        this._addLog('abortado', '', '', this.whatsapp.motivoBloqueo);
+        this._finalizarCampana('abortada_anti_baneo');
+        return;
+      }
+
       if (this.pausado) {
         console.log('⏸️  Campaña pausada. Esperando resume...');
         await this._esperarResume();
         if (this.cancelado) return;
-        mensajesEnLote = 0; // Reset lote después de pausa
+        mensajesEnLote = 0;
       }
 
-      // Verificar horario
       if (!this.enHorarioPermitido()) {
-        console.log(`🕐 Fuera de horario (${this.config.horaInicio}:00 - ${this.config.horaFin}:00). Pausando...`);
-        // Esperar hasta que estemos en horario
+        console.log(`🕐 Fuera de horario (${this.config.horaInicio}:00-${this.config.horaFin}:00 hora MX). Esperando...`);
         await this._esperarHorario();
         if (this.cancelado) return;
         mensajesEnLote = 0;
       }
 
-      // Verificar límite diario
       if (!this.verificarLimiteDiario()) {
-        console.log(`📊 Límite diario alcanzado (${this.config.limiteDiario}). Continuando mañana...`);
+        console.log(`📊 Límite diario alcanzado (${this.getEnviadosHoy()}/${this.config.limiteDiario}). Continúa mañana.`);
         await this._esperarNuevoDia();
         if (this.cancelado) return;
         mensajesEnLote = 0;
       }
 
-      // Verificar conexión WhatsApp
       if (!this.whatsapp.isConnected()) {
         console.log('⚠️ WhatsApp desconectado. Esperando reconexión...');
         await this._esperarConexion();
         if (this.cancelado) return;
+        if (!this.whatsapp.isConnected()) {
+          console.log('🛑 No se recuperó la conexión. Abortando.');
+          this._finalizarCampana('abortada_sin_conexion');
+          return;
+        }
       }
 
-      // Pausa entre lotes
       if (mensajesEnLote >= this.config.tamanoLote) {
         const pausaLote = this.getDelayLote();
-        console.log(`\n📦 Lote completado (${this.config.tamanoLote} msgs). Pausa de ${Math.round(pausaLote/1000)}s...\n`);
+        console.log(`\n📦 Lote completado (${this.config.tamanoLote} msgs). Pausa de ${Math.round(pausaLote / 1000)}s...\n`);
         await this._sleep(pausaLote);
         mensajesEnLote = 0;
         if (this.cancelado || this.pausado) continue;
       }
 
-      // Enviar mensaje actual
       const item = this.cola[this.colaIndex];
-      await this._enviarItem(item);
-      
+      const abortar = await this._enviarItem(item);
+      if (abortar) {
+        this._finalizarCampana('abortada_fallos');
+        return;
+      }
+
       this.colaIndex++;
       mensajesEnLote++;
 
-      // Delay entre mensajes
       if (this.colaIndex < this.cola.length) {
         const delay = this.getDelayMensaje();
-        console.log(`   ⏱️  Esperando ${Math.round(delay/1000)}s...`);
+        console.log(`   ⏱️  Esperando ${Math.round(delay / 1000)}s...`);
         await this._sleep(delay);
       }
     }
@@ -436,183 +435,79 @@ class EnvioMasivoService {
   }
 
   /**
-   * Enviar un item individual de la cola
+   * v4.0: enruta TODO por el servicio. Ya no toca sock.sendMessage.
+   * @returns {Boolean} true si hay que abortar la campaña
    */
   async _enviarItem(item) {
     const { contacto, plantilla, imagen } = item;
     const telefono = contacto.telefono;
 
     try {
-      // ════════════════════════════════════════════════════════════
-      // 1. VERIFICAR NUMERO (con cache 24h del servicio)
-      // ════════════════════════════════════════════════════════════
-      // En vez de llamar onWhatsApp directo cada vez, usamos el cache
-      // del servicio. Si ya validamos a este cliente en las ultimas 24h
-      // no hacemos query nueva (banderas rojas para WhatsApp).
-      const numFormateado = telefono.length === 10 ? '521' + telefono : telefono;
-      let jid;
-      
-      // Si el servicio tiene el helper cacheado lo usamos, si no fallback
-      if (typeof this.whatsapp.numeroExisteEnWA === 'function') {
-        const existe = await this.whatsapp.numeroExisteEnWA(numFormateado);
-        if (!existe) {
-          throw new Error('Número no tiene WhatsApp');
-        }
-        jid = this.whatsapp.formatearNumero(telefono);
-        console.log(`   🔍 ${telefono} → ${jid} (cache)`);
-      } else {
-        // Fallback para compatibilidad
-        try {
-          const [resultado] = await this.whatsapp.sock.onWhatsApp(numFormateado);
-          if (resultado?.exists) {
-            jid = resultado.jid;
-          } else {
-            throw new Error('Número no tiene WhatsApp');
-          }
-        } catch (verifyError) {
-          if (verifyError.message === 'Número no tiene WhatsApp') throw verifyError;
-          jid = this.whatsapp.formatearNumero(telefono);
-        }
-      }
+      const texto = plantilla ? this.personalizarMensaje(plantilla, contacto) : '';
 
-      // ════════════════════════════════════════════════════════════
-      // 2. SECUENCIA DE PRESENCIA HUMANA (anti-baneo critico)
-      // ════════════════════════════════════════════════════════════
-      // Un humano: abre WA → ve "en linea" → abre el chat (lee 1-2s)
-      // → empieza a escribir → escribe → pausa → envia → cierra
-      
-      // Fase A: marcar "en linea"
-      try {
-        await this.whatsapp.sock.sendPresenceUpdate('available');
-      } catch (e) {}
-      
-      // Fase B: pausa "leyendo el chat" (300-1200ms gaussiano)
-      const lecturaMs = 300 + Math.round(Math.random() * 900);
-      await this._sleep(lecturaMs);
-      
-      // Fase C: empezar a "escribir"
-      try {
-        await this.whatsapp.sock.sendPresenceUpdate('composing', jid);
-      } catch (e) {}
-
-      // Fase D: tiempo de typing PROPORCIONAL al largo del mensaje
-      // (lo que faltaba — antes era fijo)
-      const textoMensaje = imagen 
-        ? (plantilla ? this.personalizarMensaje(plantilla, contacto) : '')
-        : this.personalizarMensaje(plantilla, contacto);
-      const largoTexto = textoMensaje.length;
-      // ~50-90 chars/seg de tipeo humano + variacion
-      let tiempoTipeo = Math.min(Math.max(largoTexto * 18, 1500), 6500);
-      tiempoTipeo += (Math.random() * 1500 - 750); // ±750ms
-      await this._sleep(Math.round(tiempoTipeo));
-
-      // Fase E: pausar typing antes de enviar (humano deja de escribir)
-      try {
-        await this.whatsapp.sock.sendPresenceUpdate('paused', jid);
-      } catch (e) {}
-      
-      // Pequena pausa "revisando el mensaje" antes de mandar
-      await this._sleep(200 + Math.round(Math.random() * 400));
-
-      // ════════════════════════════════════════════════════════════
-      // 3. ENVIAR (con timeout de 60s para evitar que se trabe)
-      // ════════════════════════════════════════════════════════════
-      const enviarConTimeout = (msgContent) => {
-        return Promise.race([
-          this.whatsapp.sock.sendMessage(jid, msgContent),
-          new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('Timeout: envío tardó más de 60s')), 60000)
-          )
-        ]);
-      };
-
-      let sendResult;
+      let res;
       if (imagen) {
-        const caption = plantilla ? this.personalizarMensaje(plantilla, contacto) : '';
-        
-        let mediaContent;
-        if (imagen.startsWith('data:') || imagen.startsWith('/9j/') || imagen.startsWith('iVBOR')) {
-          const matches = imagen.match(/^data:(.+);base64,(.+)$/);
-          if (matches) {
-            mediaContent = Buffer.from(matches[2], 'base64');
-          } else {
-            mediaContent = Buffer.from(imagen, 'base64');
-          }
-        } else if (imagen.startsWith('http')) {
-          mediaContent = { url: imagen };
-        } else {
-          mediaContent = fs.readFileSync(imagen);
-        }
-
-        sendResult = await enviarConTimeout({
-          image: mediaContent,
-          caption: caption,
-        });
+        res = await this.whatsapp.enviarImagen(telefono, imagen, texto);
       } else {
-        sendResult = await enviarConTimeout({ text: textoMensaje });
+        res = await this.whatsapp.enviarMensaje(telefono, texto);
       }
 
-      // ════════════════════════════════════════════════════════════
-      // 4. POST-ENVIO: cachear mensaje + volver a "no en linea"
-      // ════════════════════════════════════════════════════════════
-      // Cache para getMessage retries (anti-baneo critico)
-      if (sendResult?.key?.id && typeof this.whatsapp.cacheMensaje === 'function') {
-        this.whatsapp.cacheMensaje(sendResult.key.id, { 
-          conversation: textoMensaje 
-        });
+      // ── Casos que NO son fallo del número: son frenos del anti-baneo ──
+      if (!res.exito && (res.limitado || res.fueraVentana)) {
+        console.log(`   ⏸️  ${telefono}: ${res.error} — se reintenta después`);
+        // No avanzar el índice: el loop volverá a evaluar las guardas.
+        this.colaIndex--;
+        await this._sleep(60000);
+        return false;
       }
-      
-      // Volver a "unavailable" en background (humano cierra WhatsApp)
-      // No bloqueamos el flujo, lo hacemos en setTimeout
-      setTimeout(async () => {
-        try { 
-          await this.whatsapp.sock.sendPresenceUpdate('unavailable'); 
-        } catch (e) {}
-      }, 2000 + Math.random() * 3000);
 
-      // Actualizar estado
+      if (!res.exito && res.noContactar) {
+        item.estado = 'omitido';
+        item.error = 'NO CONTACTAR';
+        this.stats.omitidos++;
+        this.stats.pendientes--;
+        this._addLog('omitido', contacto.nombre, telefono, 'NO CONTACTAR');
+        return false;
+      }
+
+      if (!res.exito) {
+        throw new Error(res.error || 'Error desconocido');
+      }
+
+      // ── Éxito ──
+      this.fallosConsecutivos = 0;
       item.estado = 'enviado';
       item.enviadoEn = new Date().toISOString();
       this.stats.enviados++;
       this.stats.pendientes--;
       this.stats.ultimoEnvio = Date.now();
-      this.config.enviadosHoy++;
 
-      // Hook: notificar envío exitoso (para registrar en Google Sheets)
       if (typeof this.onEnviado === 'function') {
-        try { this.onEnviado({ telefono: telefono, nombre: contacto.nombre, saldo: contacto.saldo, diasAtraso: contacto.diasAtraso }); } catch (e) {}
+        try {
+          this.onEnviado({ telefono, nombre: contacto.nombre, saldo: contacto.saldo, diasAtraso: contacto.diasAtraso });
+        } catch (e) {}
       }
 
-      // Mapear TODOS los IDs posibles al teléfono real
-      if (this.chatbot) {
-        // El JID que usamos para enviar (normalmente @s.whatsapp.net)
-        const jidClean = jid.replace('@s.whatsapp.net', '').replace('@lid', '');
-        this.chatbot.mapearLid(jidClean, telefono);
-        
-        // El remoteJid de la respuesta (puede ser LID)
-        if (sendResult?.key?.remoteJid) {
-          const responseJid = sendResult.key.remoteJid;
-          const responseClean = responseJid.replace('@s.whatsapp.net', '').replace('@lid', '');
-          this.chatbot.mapearLid(responseClean, telefono);
-          console.log(`   🔗 Mapeado: ${responseClean} → ${telefono}`);
+      // Mapear LIDs al teléfono real
+      if (this.chatbot && typeof this.chatbot.mapearLid === 'function') {
+        if (res.remoteJid) {
+          const clean = res.remoteJid.replace('@s.whatsapp.net', '').replace('@lid', '');
+          this.chatbot.mapearLid(clean, telefono);
+          console.log(`   🔗 Mapeado: ${clean} → ${telefono}`);
         }
-        
-        // El participant si existe
-        if (sendResult?.key?.participant) {
-          const partClean = sendResult.key.participant.replace('@s.whatsapp.net', '').replace('@lid', '');
-          this.chatbot.mapearLid(partClean, telefono);
+        if (res.participant) {
+          const clean = res.participant.replace('@s.whatsapp.net', '').replace('@lid', '');
+          this.chatbot.mapearLid(clean, telefono);
         }
       }
 
-      // Calcular velocidad y tiempo estimado
-      const transcurrido = (Date.now() - this.stats.inicioEnvio) / 3600000; // horas
-      this.stats.velocidadPromedio = Math.round(this.stats.enviados / transcurrido);
+      const transcurrido = (Date.now() - this.stats.inicioEnvio) / 3600000;
+      this.stats.velocidadPromedio = transcurrido > 0 ? Math.round(this.stats.enviados / transcurrido) : 0;
       this.stats.tiempoEstimado = this.calcularTiempoEstimado();
 
       console.log(`   ✅ [${this.stats.enviados}/${this.stats.totalContactos}] ${contacto.nombre} (${telefono})`);
-      
-      // Log en tiempo real
       this._addLog('enviado', contacto.nombre, telefono, null);
+      return false;
 
     } catch (error) {
       item.estado = 'fallido';
@@ -620,26 +515,28 @@ class EnvioMasivoService {
       this.stats.fallidos++;
       this.stats.pendientes--;
       this.stats.errores.push({
-        telefono,
-        nombre: contacto.nombre,
-        error: error.message,
-        timestamp: new Date().toISOString(),
+        telefono, nombre: contacto.nombre, error: error.message, timestamp: new Date().toISOString(),
       });
 
       console.log(`   ❌ [${this.stats.enviados + this.stats.fallidos}/${this.stats.totalContactos}] ${contacto.nombre} (${telefono}): ${error.message}`);
-      
-      // Log en tiempo real
       this._addLog('fallido', contacto.nombre, telefono, error.message);
 
-      // Si hay muchos errores seguidos, pausar (posible baneo)
-      const erroresRecientes = this.stats.errores.filter(e => 
-        Date.now() - new Date(e.timestamp).getTime() < 60000
-      ).length;
-
-      if (erroresRecientes >= 3) {
-        console.log('🚨 ALERTA: Muchos errores consecutivos. Pausando 5 minutos...');
-        await this._sleep(300000); // 5 minutos
+      // "Número no tiene WhatsApp" no cuenta como señal de baneo.
+      const esNumeroMalo = /no est[áa] en whatsapp|no tiene whatsapp/i.test(error.message);
+      if (!esNumeroMalo) {
+        this.fallosConsecutivos++;
       }
+
+      // v4.0: ABORTA. Antes dormía 5 min y seguía insistiendo — que es
+      // exactamente lo que convierte un problema en un baneo.
+      if (this.fallosConsecutivos >= this.maxFallosConsecutivos) {
+        console.log(`\n🚨 ${this.fallosConsecutivos} fallos consecutivos. ABORTANDO campaña.`);
+        console.log('   Revisa el número en el celular antes de reanudar.\n');
+        this._addLog('abortado', '', '', `${this.fallosConsecutivos} fallos consecutivos`);
+        return true;
+      }
+
+      return false;
     }
   }
 
@@ -666,8 +563,6 @@ class EnvioMasivoService {
   cancelar() {
     this.cancelado = true;
     this.pausado = false;
-    
-    // Force reset si se quedó trabado
     setTimeout(() => {
       if (this.enviando) {
         console.log('🔧 Force reset de campaña trabada');
@@ -676,12 +571,10 @@ class EnvioMasivoService {
         this.stats.pausado = false;
       }
     }, 3000);
-    
     console.log('🛑 Envío masivo CANCELADO');
     return true;
   }
 
-  // Forzar reset total (para cuando se traba)
   forceReset() {
     this.enviando = false;
     this.pausado = false;
@@ -690,35 +583,32 @@ class EnvioMasivoService {
     this.stats.pausado = false;
     this.cola = [];
     this.colaIndex = 0;
+    this.fallosConsecutivos = 0;
     console.log('🔧 FORCE RESET completo');
     return true;
   }
 
-  /**
-   * Actualizar configuración de delays
-   */
   actualizarConfig(nuevaConfig) {
-    Object.assign(this.config, nuevaConfig);
+    Object.assign(this.config, this._sanearConfig(nuevaConfig));
     return this.config;
   }
 
   // ═══════════════════════════════════════════════════════════
-  // UTILIDADES DE ESPERA
+  // ESPERAS
   // ═══════════════════════════════════════════════════════════
 
   _sleep(ms) {
     return new Promise(resolve => {
-      const check = setInterval(() => {
-        if (this.cancelado) {
-          clearInterval(check);
-          resolve();
-        }
-      }, 1000);
-      
-      setTimeout(() => {
+      let terminado = false;
+      const fin = () => {
+        if (terminado) return;
+        terminado = true;
         clearInterval(check);
+        clearTimeout(t);
         resolve();
-      }, ms);
+      };
+      const check = setInterval(() => { if (this.cancelado) fin(); }, 1000);
+      const t = setTimeout(fin, ms);
     });
   }
 
@@ -730,19 +620,20 @@ class EnvioMasivoService {
 
   async _esperarHorario() {
     while (!this.enHorarioPermitido() && !this.cancelado) {
-      await new Promise(r => setTimeout(r, 60000)); // Verificar cada minuto
+      await new Promise(r => setTimeout(r, 60000));
     }
   }
 
   async _esperarNuevoDia() {
     while (!this.verificarLimiteDiario() && !this.cancelado) {
-      await new Promise(r => setTimeout(r, 300000)); // Verificar cada 5 minutos
+      await new Promise(r => setTimeout(r, 300000));
     }
   }
 
   async _esperarConexion() {
     let intentos = 0;
     while (!this.whatsapp.isConnected() && !this.cancelado && intentos < 30) {
+      if (this.whatsapp.bloqueado) return;
       await new Promise(r => setTimeout(r, 10000));
       intentos++;
     }
@@ -757,7 +648,7 @@ class EnvioMasivoService {
     this.pausado = false;
     this.stats.enProgreso = false;
 
-    const duracion = Date.now() - this.stats.inicioEnvio;
+    const duracion = Date.now() - (this.stats.inicioEnvio || Date.now());
 
     const resumen = {
       campana: this.campanaActiva?.nombre,
@@ -765,6 +656,7 @@ class EnvioMasivoService {
       totalContactos: this.stats.totalContactos,
       enviados: this.stats.enviados,
       fallidos: this.stats.fallidos,
+      omitidos: this.stats.omitidos,
       pendientes: this.stats.pendientes,
       duracion: `${Math.round(duracion / 60000)} minutos`,
       inicio: this.campanaActiva?.inicio,
@@ -777,20 +669,14 @@ class EnvioMasivoService {
     console.log(`📊 CAMPAÑA ${estado.toUpperCase()}: ${resumen.campana}`);
     console.log(`   ✅ Enviados: ${resumen.enviados}`);
     console.log(`   ❌ Fallidos: ${resumen.fallidos}`);
+    console.log(`   🚫 Omitidos: ${resumen.omitidos}`);
     console.log(`   ⏱️  Duración: ${resumen.duracion}`);
     console.log('═══════════════════════════════════════════════════════════\n');
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // GETTERS
-  // ═══════════════════════════════════════════════════════════
-
   _addLog(tipo, nombre, telefono, error) {
     this.logEventos.unshift({
-      tipo,
-      nombre,
-      telefono,
-      error,
+      tipo, nombre, telefono, error,
       timestamp: new Date().toISOString(),
       progreso: `${this.stats.enviados + this.stats.fallidos}/${this.stats.totalContactos}`,
     });
@@ -809,10 +695,12 @@ class EnvioMasivoService {
         delayMaximo: this.config.delayMaximo / 1000,
         tamanoLote: this.config.tamanoLote,
         limiteDiario: this.config.limiteDiario,
-        enviadosHoy: this.config.enviadosHoy,
+        enviadosHoy: this.getEnviadosHoy(),
         horaInicio: this.config.horaInicio,
         horaFin: this.config.horaFin,
+        enHorario: this.enHorarioPermitido(),
       },
+      salud: typeof this.whatsapp.estadoSalud === 'function' ? this.whatsapp.estadoSalud() : null,
       historial: this.historial.slice(-5),
     };
   }
@@ -829,27 +717,27 @@ class EnvioMasivoService {
 
   getProgreso() {
     const total = this.stats.totalContactos;
-    const enviados = this.stats.enviados + this.stats.fallidos;
+    const procesados = this.stats.enviados + this.stats.fallidos + this.stats.omitidos;
     return {
-      porcentaje: total > 0 ? Math.round((enviados / total) * 100) : 0,
+      porcentaje: total > 0 ? Math.round((procesados / total) * 100) : 0,
       enviados: this.stats.enviados,
       fallidos: this.stats.fallidos,
+      omitidos: this.stats.omitidos,
       pendientes: this.stats.pendientes,
       total,
       enProgreso: this.stats.enProgreso,
       pausado: this.stats.pausado,
       tiempoEstimado: this.stats.tiempoEstimado,
       velocidad: this.stats.velocidadPromedio,
+      bloqueado: !!this.whatsapp.bloqueado,
+      motivoBloqueo: this.whatsapp.motivoBloqueo || null,
     };
   }
 
-  /**
-   * Envío masivo flexible (compatibilidad con server.js original)
-   */
-  async enviarMasivoFlexible(contactos, plantilla, columnaTeléfono) {
+  async enviarMasivoFlexible(contactos, plantilla, columnaTelefono) {
     const contactosFormateados = contactos.map(c => ({
       nombre: c.Cliente || c.nombre || c.Nombre || 'Cliente',
-      telefono: (c[columnaTeléfono] || c.telefono || c.Teléfono || c.Telefono || '').toString(),
+      telefono: (c[columnaTelefono] || c.telefono || c['Teléfono'] || c.Telefono || c.TELEFONO || '').toString(),
       saldo: parseFloat(c.Saldo || c.saldo || c.monto || 0),
       diasAtraso: parseInt(c['Días Atraso'] || c.diasAtraso || c.dias || 0),
     }));
