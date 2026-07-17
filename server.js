@@ -1735,7 +1735,7 @@ async function cargarEstado() {
           '<span style="color:' + color + ';">📊 ' + s.enviadosHoy + '/' + s.limiteDiario + ' hoy</span>' +
           ' · <span style="color:' + (s.enVentanaHoraria ? 'var(--green)' : 'var(--yellow)') + ';">' +
             (s.enVentanaHoraria ? '🕐 en ventana' : '🌙 fuera de ventana') + '</span>' +
-          ' · <span>📱 ' + s.registrosQRHoy + '/3 QR hoy</span>';
+          ' · <span>📱 ' + s.registrosQRHoy + '/' + (s.maxRegistrosDia || 5) + ' QR hoy</span>';
       }
     }
     
