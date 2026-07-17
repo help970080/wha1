@@ -40,6 +40,8 @@ class WhatsAppService {
     this.lidMap = new Map();
     this.authDir = './auth_session';
     this.estadoFile = './wa_estado.json';
+    this.noContactarFile = './wa_no_contactar.json';
+    this.noContactar = new Map(); // tel10 → { motivo, ts }
 
     this.sentMsgCache = new Map();
     this.maxCacheSize = 500;
@@ -57,6 +59,79 @@ class WhatsAppService {
     this.respetarVentana = true;
 
     this._cargarEstado();
+    this._cargarNoContactar();
+  }
+
+  // ══════════════════════════════════════════
+  // LISTA NO CONTACTAR (v3.1)
+  // Compartida entre chatbot y campaña. Persistente.
+  // Un reporte de usuario pesa más que 100 mensajes en el
+  // sistema de baneos de WhatsApp. Esta lista es la defensa.
+  // ══════════════════════════════════════════
+
+  _tel10(t) {
+    const d = String(t || '').replace(/\D/g, '');
+    return d.length >= 10 ? d.slice(-10) : d;
+  }
+
+  _cargarNoContactar() {
+    try {
+      if (!fs.existsSync(this.noContactarFile)) return;
+      const arr = JSON.parse(fs.readFileSync(this.noContactarFile, 'utf8'));
+      if (Array.isArray(arr)) {
+        for (const r of arr) {
+          if (r && r.telefono) this.noContactar.set(this._tel10(r.telefono), { motivo: r.motivo || '', ts: r.ts || Date.now() });
+        }
+      }
+      console.log(`🚫 Lista NO CONTACTAR: ${this.noContactar.size} números`);
+    } catch (e) {
+      console.error('Error cargando no-contactar:', e.message);
+    }
+  }
+
+  _guardarNoContactar() {
+    try {
+      const arr = [...this.noContactar.entries()].map(([telefono, v]) => ({
+        telefono, motivo: v.motivo, ts: v.ts, fecha: new Date(v.ts).toISOString()
+      }));
+      fs.writeFileSync(this.noContactarFile, JSON.stringify(arr, null, 2));
+    } catch (e) {
+      console.error('❌ No se pudo guardar wa_no_contactar.json:', e.message);
+    }
+  }
+
+  /**
+   * Da de baja un número. Irreversible desde el bot (solo manual).
+   * El timestamp sirve como evidencia de ejercicio del derecho de
+   * oposición (ARCO / LFPDPPP) si alguien se queja en CONDUSEF.
+   */
+  agregarNoContactar(telefono, motivo = 'solicitud del titular') {
+    const t = this._tel10(telefono);
+    if (!t || t.length < 10) return false;
+    if (this.noContactar.has(t)) return true;
+    this.noContactar.set(t, { motivo, ts: Date.now() });
+    this._guardarNoContactar();
+    console.log(`🚫 NO CONTACTAR: ${t} — ${motivo}`);
+    return true;
+  }
+
+  quitarNoContactar(telefono) {
+    const t = this._tel10(telefono);
+    if (!this.noContactar.has(t)) return false;
+    this.noContactar.delete(t);
+    this._guardarNoContactar();
+    console.log(`✅ Reactivado: ${t}`);
+    return true;
+  }
+
+  estaNoContactar(telefono) {
+    return this.noContactar.has(this._tel10(telefono));
+  }
+
+  getNoContactar() {
+    return [...this.noContactar.entries()].map(([telefono, v]) => ({
+      telefono, motivo: v.motivo, fecha: new Date(v.ts).toISOString()
+    }));
   }
 
   // ══════════════════════════════════════════
@@ -523,6 +598,12 @@ class WhatsAppService {
 
     this._rotarDia();
 
+    // Guard NO CONTACTAR: antes que cualquier otra cosa.
+    if (this.estaNoContactar(telefono)) {
+      console.log(`🚫 ${telefono} está en NO CONTACTAR. Bloqueado.`);
+      return { exito: false, error: 'Número en lista NO CONTACTAR', telefono, noContactar: true };
+    }
+
     // Backstop duro: aunque envioMasivoService se configure mal o alguien
     // suba el límite en el panel, aquí se frena.
     if (!opts.ignorarLimite && this.enviadosHoy >= this.limiteDiarioDuro) {
@@ -578,7 +659,7 @@ class WhatsAppService {
       this.ultimoEnvio = { tel10, timestamp: Date.now() };
 
       console.log(`✅ Mensaje enviado a ${telefono} (${this.enviadosHoy}/${this.limiteDiarioDuro} hoy)`);
-      return { exito: true, telefono, enviadosHoy: this.enviadosHoy };
+      return { exito: true, telefono, enviadosHoy: this.enviadosHoy, msgId: sentMsg?.key?.id, remoteJid: sentMsg?.key?.remoteJid, participant: sentMsg?.key?.participant };
     } catch (error) {
       console.error(`❌ Error enviando a ${telefono}:`, error.message);
 
@@ -588,6 +669,109 @@ class WhatsAppService {
         this._panico('Rate limit detectado durante envío. Campaña cortada.');
       }
 
+      return { exito: false, error: error.message, telefono };
+    }
+  }
+
+  /**
+   * NUEVO v3.1 — Envío de imagen con los MISMOS backstops que enviarMensaje.
+   *
+   * Antes no existía: por eso envioMasivoService llamaba
+   * sock.sendMessage() directo y se saltaba límite diario, ventana
+   * horaria, contador persistente y lista NO CONTACTAR.
+   *
+   * @param {String|Buffer} imagen - base64 data URL, http URL, path o Buffer
+   * @param {Object} opts - { ignorarLimite, ignorarVentana }
+   */
+  async enviarImagen(telefono, imagen, caption = '', opts = {}) {
+    if (!this.isConnected()) {
+      return { exito: false, error: 'WhatsApp no conectado' };
+    }
+
+    this._rotarDia();
+
+    if (this.estaNoContactar(telefono)) {
+      console.log(`🚫 ${telefono} está en NO CONTACTAR. Bloqueado.`);
+      return { exito: false, error: 'Número en lista NO CONTACTAR', telefono, noContactar: true };
+    }
+
+    if (!opts.ignorarLimite && this.enviadosHoy >= this.limiteDiarioDuro) {
+      console.log(`🛑 Límite diario duro alcanzado (${this.limiteDiarioDuro}). No se envía a ${telefono}.`);
+      return { exito: false, error: `Límite diario alcanzado (${this.limiteDiarioDuro})`, telefono, limitado: true };
+    }
+
+    if (!opts.ignorarVentana && !this.enVentanaHoraria()) {
+      console.log(`🌙 Fuera de ventana horaria. No se envía a ${telefono}.`);
+      return { exito: false, error: 'Fuera de ventana horaria', telefono, fueraVentana: true };
+    }
+
+    try {
+      const jid = this.formatearNumero(telefono);
+      const numeroSinAt = jid.split('@')[0];
+
+      const existe = await this.numeroExisteEnWA(numeroSinAt);
+      if (!existe) {
+        return { exito: false, error: 'Numero no esta en WhatsApp', telefono };
+      }
+
+      // Normalizar la imagen a lo que espera Baileys
+      let media;
+      if (Buffer.isBuffer(imagen)) {
+        media = imagen;
+      } else if (typeof imagen === 'string') {
+        if (imagen.startsWith('data:')) {
+          const m = imagen.match(/^data:(.+);base64,(.+)$/);
+          if (!m) return { exito: false, error: 'data URL inválida', telefono };
+          media = Buffer.from(m[2], 'base64');
+        } else if (imagen.startsWith('/9j/') || imagen.startsWith('iVBOR')) {
+          media = Buffer.from(imagen, 'base64');
+        } else if (imagen.startsWith('http')) {
+          media = { url: imagen };
+        } else {
+          media = fs.readFileSync(imagen);
+        }
+      } else {
+        return { exito: false, error: 'Formato de imagen no soportado', telefono };
+      }
+
+      try { await this.sock.sendPresenceUpdate('available'); } catch (e) {}
+      await new Promise(r => setTimeout(r, 800 + Math.random() * 1500));
+      try { await this.sock.sendPresenceUpdate('composing', jid); } catch (e) {}
+      const tiempoTipeo = Math.min(Math.max((caption || '').length * 22, 2500), 9000);
+      await new Promise(r => setTimeout(r, tiempoTipeo * (0.7 + Math.random() * 0.6)));
+      try { await this.sock.sendPresenceUpdate('paused', jid); } catch (e) {}
+
+      const payload = { image: media };
+      if (caption && caption.trim()) payload.caption = caption;
+
+      const sentMsg = await this.sock.sendMessage(jid, payload);
+
+      if (sentMsg?.key?.id && caption) {
+        this.cacheMensaje(sentMsg.key.id, { conversation: caption });
+      }
+
+      this.enviadosHoy++;
+      this._guardarEstado();
+
+      setTimeout(async () => {
+        try { await this.sock.sendPresenceUpdate('unavailable'); } catch (e) {}
+      }, 3000 + Math.random() * 4000);
+
+      const tel10 = this._tel10(telefono);
+      if (sentMsg?.key?.remoteJid) {
+        const lid = sentMsg.key.remoteJid.split('@')[0];
+        this.lidMap.set(lid, tel10);
+      }
+      this.ultimoEnvio = { tel10, timestamp: Date.now() };
+
+      console.log(`✅ Imagen enviada a ${telefono} (${this.enviadosHoy}/${this.limiteDiarioDuro} hoy)`);
+      return { exito: true, telefono, msgId: sentMsg?.key?.id, enviadosHoy: this.enviadosHoy, remoteJid: sentMsg?.key?.remoteJid };
+    } catch (error) {
+      console.error(`❌ Error enviando imagen a ${telefono}:`, error.message);
+      const m = String(error.message || '').toLowerCase();
+      if (m.includes('rate') || m.includes('429') || m.includes('overlimit')) {
+        this._panico('Rate limit detectado durante envío de imagen. Campaña cortada.');
+      }
       return { exito: false, error: error.message, telefono };
     }
   }
