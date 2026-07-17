@@ -85,7 +85,10 @@ class ChatBotCobranza {
       PROPUESTA_CONVENIO: 'propuesta_convenio',     // Bot propuso A/B, espera elección
       ESPERA_CONFIRMACION: 'espera_confirmacion',   // Bot mandó link, espera "CONFIRMO"
       CONVENIO_ACTIVO: 'convenio_activo',           // Cliente confirmó, espera comprobante
-      PAGO_UNICO: 'pago_unico'                      // Saldo bajo, no convenio
+      PAGO_UNICO: 'pago_unico',                     // Saldo bajo, no convenio
+      // v4: baja solicitada por el titular. Terminal: el bot NO vuelve
+      // a escribir a este número por ningún flujo.
+      NO_CONTACTAR: 'no_contactar'
     };
 
     this.NIVELES = {
@@ -305,8 +308,23 @@ class ChatBotCobranza {
         } catch (e) {}
       }
 
+      // v4: respuesta null = silencio deliberado (número dado de baja).
+      // Se marca leído para no dejar la conversación colgada, pero no
+      // se contesta.
+      if (respuesta === null) {
+        try { await this.whatsapp.marcarLeido(msg); } catch (e) {}
+        return;
+      }
+
       if (respuesta) {
-        await this.whatsapp.sock.sendMessage(jid, { text: respuesta });
+        // v4: antes era sock.sendMessage() directo → respondía en <200ms,
+        // sin marcar leído y sin presencia. responderHumano() marca leído,
+        // espera, muestra "escribiendo…" proporcional al texto, y manda.
+        if (typeof this.whatsapp.responderHumano === 'function') {
+          await this.whatsapp.responderHumano(jid, respuesta, msg);
+        } else {
+          await this.whatsapp.sock.sendMessage(jid, { text: respuesta });
+        }
         this.registrarInteraccion(telParaConv, 'enviado', respuesta.substring(0, 50), jid);
       }
     } catch (error) {
@@ -450,6 +468,22 @@ class ChatBotCobranza {
     const cliente = this.obtenerCliente(telefono);
     const conv = this.obtenerConversacion(telefono);
 
+    // ═══════════════════════════════════════════════════════════
+    // v4: GUARD DE BAJA — se evalúa ANTES QUE TODO.
+    // Antes que identificación, antes que excusas, antes que negativas.
+    // ═══════════════════════════════════════════════════════════
+
+    // 1. ¿Ya está dado de baja? → silencio total. null = no se responde.
+    if (this.estaEnNoContactar(telefono)) {
+      console.log(`🚫 [${telefono}] en NO CONTACTAR — no se responde`);
+      return null;
+    }
+
+    // 2. ¿Está pidiendo la baja ahora? → confirmar UNA vez y cerrar.
+    if (this.esBajaSolicitada(textoLimpio)) {
+      return this.manejarBaja(telefono, textoLimpio, cliente);
+    }
+
     // FIX: si no identificamos al cliente, pedir identificación
     // en lugar de saludarlo con un nombre equivocado
     if (cliente.desconocido) {
@@ -533,18 +567,76 @@ _Esto nos ayuda a evitar errores y proteger su información._`;
       'no me alcanza', 'estoy sin dinero', 'no hay dinero', 'crisis', 'difícil',
       'me robaron', 'perdí trabajo', 'estoy enfermo', 'hospital', 'emergencia',
       'ya pagué', 'ya pague', 'no debo', 'está pagado', 'esta pagado',
-      'no es mío', 'no es mio', 'yo no saqué', 'yo no saque', 'no reconozco',
-      'déjame en paz', 'dejame en paz', 'no molesten', 'ya no llamen'
+      'no es mío', 'no es mio', 'yo no saqué', 'yo no saque', 'no reconozco'
+      // v4: 'déjame en paz', 'no molesten', 'ya no llamen' SALIERON de aquí.
+      // Estaban tratadas como excusa → manejarExcusa() insistía con el
+      // convenio. Eso es discutirle a quien tiene el dedo en "Bloquear y
+      // reportar", que es la señal que más pesa en el baneo de WhatsApp.
+      // Ahora las atrapa esBajaSolicitada(), que se evalúa ANTES.
     ];
     return excusas.some(e => texto.includes(e));
+  }
+
+  /**
+   * v4: BAJA SOLICITADA POR EL TITULAR.
+   *
+   * Se evalúa antes que excusa/negativa/agresión. Detecta dos familias:
+   *   1. Pide explícitamente que no lo contacten
+   *   2. Amenaza con bloquear/reportar (mismo desenlace, y el reporte
+   *      es lo que directamente tumba la cuenta)
+   *
+   * Además cubre el derecho de oposición (ARCO / LFPDPPP art. 28):
+   * si el titular pide dejar de ser contactado, hay obligación de
+   * atenderlo, y la lista con timestamp es la evidencia.
+   */
+  esBajaSolicitada(texto) {
+    const t = String(texto || '').toLowerCase();
+
+    const frases = [
+      // Pide baja / no contacto
+      'déjame en paz', 'dejame en paz', 'dejenme en paz', 'déjenme en paz',
+      'no molesten', 'no me molesten', 'no moleste', 'dejen de molestar',
+      'ya no llamen', 'no me llamen', 'no vuelvan a llamar', 'dejen de llamar',
+      'no me escriban', 'no me escribas', 'dejen de escribir',
+      'no me contacten', 'no me contacte', 'no vuelvan a contactar',
+      'no quiero que me contacten', 'ya no me busquen', 'no me busquen',
+      'quiero que me den de baja', 'denme de baja', 'darme de baja',
+      'dar de baja este numero', 'dar de baja este número', 'dar de baja mi numero',
+      // OJO: 'dar de baja' a secas NO va aquí. Hace substring match con
+      // "quiero dar de baja mi tarjeta de crédito", que es otra cosa, y
+      // sacaría de cobranza a un cliente que sí está hablando contigo.
+      'borren mi numero', 'borren mi número', 'elimina mi numero',
+      'quita mi numero', 'quiten mi numero', 'quiten mi número',
+      'no me manden mensajes', 'ya no me manden', 'basta de mensajes',
+      'este no es mi numero', 'este no es mi número', 'numero equivocado',
+      'número equivocado', 'se equivocaron de numero', 'no conozco a esa persona',
+      'yo no soy', 'está mal el numero', 'esta mal el numero',
+      // Amenaza de bloqueo / reporte
+      'los voy a bloquear', 'te voy a bloquear', 'voy a bloquear',
+      'los bloqueo', 'te bloqueo', 'los voy a reportar', 'te voy a reportar',
+      'voy a reportar', 'los reporto', 'te reporto', 'reportar este numero',
+      'voy a denunciar', 'los voy a denunciar', 'denunciar', 'profeco', 'condusef',
+      // Comandos tipo opt-out
+      'stop', 'baja', 'unsubscribe'
+    ];
+
+    // 'stop' y 'baja' solo si el mensaje es corto: "baja" es opt-out,
+    // "voy a dar de baja mi tarjeta" no.
+    const cortos = ['stop', 'baja', 'unsubscribe'];
+    return frases.some(f => {
+      if (cortos.includes(f)) return t.trim() === f;
+      return t.includes(f);
+    });
   }
 
   esNegativa(texto) {
     const negativas = [
       'no voy a pagar', 'no pago', 'no quiero', 'no me interesa',
       'demándame', 'demandame', 'demanden', 'no tengo miedo',
-      'hagan lo que quieran', 'me vale', 'no me importa',
-      'bloquear', 'los voy a bloquear', 'reportar'
+      'hagan lo que quieran', 'me vale', 'no me importa'
+      // v4: 'bloquear' y 'reportar' SALIERON de aquí → esBajaSolicitada().
+      // manejarNegativa() presiona, y presionar a quien ya dijo que te va
+      // a reportar es la forma más rápida de que lo haga.
     ];
     return negativas.some(n => texto.includes(n));
   }
@@ -613,6 +705,91 @@ _Esto nos ayuda a evitar errores y proteger su información._`;
   // ═══════════════════════════════════════
   // MANEJO DE SITUACIONES ESPECIALES
   // ═══════════════════════════════════════
+
+  /**
+   * v4: ¿el número está dado de baja?
+   * La lista vive en el servicio de WhatsApp (wa_no_contactar.json),
+   * compartida con envioMasivoService para que la campaña también filtre.
+   */
+  estaEnNoContactar(telefono) {
+    try {
+      if (this.whatsapp && typeof this.whatsapp.estaNoContactar === 'function') {
+        return this.whatsapp.estaNoContactar(telefono);
+      }
+    } catch (e) {}
+    // Fallback: estado terminal en la conversación
+    const conv = this.conversaciones.get(telefono);
+    return !!(conv && conv.estado === this.ESTADOS.NO_CONTACTAR);
+  }
+
+  /**
+   * v4: El titular pidió la baja (o amenazó con reportar).
+   *
+   * Se confirma UNA sola vez y el número queda fuera para siempre.
+   * No se negocia, no se ofrece convenio, no se pregunta el motivo.
+   * Cualquier mensaje posterior de este número NO recibe respuesta.
+   *
+   * La cobranza legítima sigue por los canales que el titular no ha
+   * rechazado (llamada del gestor, domicilio, vía judicial). Lo que se
+   * apaga es WhatsApp, que es donde el reporte te tumba la cuenta.
+   */
+  manejarBaja(telefono, texto, cliente) {
+    const nombre = (cliente && !cliente.desconocido && cliente.nombre)
+      ? cliente.nombre.split(' ')[0]
+      : null;
+
+    // Distinguir motivo: número equivocado vs. baja voluntaria
+    const esEquivocado = /no es mi numero|no es mi número|numero equivocado|número equivocado|se equivocaron|no conozco a esa persona|yo no soy|está mal el numero|esta mal el numero/i.test(texto);
+    const esAmenaza = /bloquear|reportar|denunciar|profeco|condusef/i.test(texto);
+    const motivo = esEquivocado ? 'número equivocado'
+      : esAmenaza ? 'amenaza de reporte/bloqueo'
+      : 'solicitud del titular';
+
+    // 1. Registrar en la lista persistente del servicio
+    let registrado = false;
+    try {
+      if (this.whatsapp && typeof this.whatsapp.agregarNoContactar === 'function') {
+        registrado = this.whatsapp.agregarNoContactar(telefono, motivo);
+      }
+    } catch (e) {
+      console.error('Error registrando baja:', e.message);
+    }
+
+    // 2. Estado terminal en la conversación (respaldo si el servicio falla)
+    this.guardarConversacion(telefono, this.ESTADOS.NO_CONTACTAR);
+
+    // 3. Hook para Google Sheets / auditoría
+    if (typeof this.onBaja === 'function') {
+      try {
+        this.onBaja({
+          telefono,
+          nombre: nombre || '',
+          motivo,
+          textoOriginal: String(texto).substring(0, 200),
+          fecha: new Date().toISOString()
+        });
+      } catch (e) {}
+    }
+
+    console.log(`🚫 BAJA [${telefono}] motivo: ${motivo} ${registrado ? '(registrado)' : '(SOLO en conversación — revisar servicio)'}`);
+
+    // 4. Confirmación única. Corta, sin reproche, sin última oferta.
+    if (esEquivocado) {
+      return `Entendido. Retiramos este número de nuestros registros y no volverá a recibir mensajes nuestros.
+
+Una disculpa por la molestia.
+
+_${EMPRESA.footerCorto}_`;
+    }
+
+    return `Entendido${nombre ? `, ${nombre}` : ''}. Damos de baja este número y no volveremos a contactarlo por este medio.
+
+Su solicitud queda registrada con fecha de hoy.
+
+Si en algún momento desea retomar el tema, puede escribir usted mismo a este número.
+
+_${EMPRESA.footerCorto}_`;
+  }
 
   manejarExcusa(telefono, texto, cliente, nivel) {
     this.guardarConversacion(telefono, this.ESTADOS.EXCUSAS);
@@ -1371,6 +1548,15 @@ _Cobranza Mercantil Especializada_`;
   }
 
   async manejarImagen(jid, telefono) {
+    // v4: guard de baja. manejarImagen se llama desde procesarMensaje
+    // ANTES de generarRespuesta cuando el mensaje no trae texto, así que
+    // sin esto un número dado de baja seguiría recibiendo respuesta al
+    // mandar una foto.
+    if (this.estaEnNoContactar(telefono)) {
+      console.log(`🚫 [${telefono}] en NO CONTACTAR — imagen ignorada`);
+      return;
+    }
+
     const cliente = this.obtenerCliente(telefono);
 
     // FIX: si es desconocido, no transferir a gestor; pedir identificación
