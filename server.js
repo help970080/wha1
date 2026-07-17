@@ -56,6 +56,19 @@ chatbot.onRespuesta = function (d) {
   sheets.registrarRespuesta(EMPRESA.empresaNombre, d.telefono, d.nombre, d.mensaje, d.tipo).catch(function () {});
 };
 
+// v4: baja solicitada por el titular. Se registra en Sheets como evidencia
+// del ejercicio del derecho de oposición (ARCO / LFPDPPP).
+chatbot.onBaja = function (d) {
+  console.log(`🚫 BAJA registrada: ${d.telefono} (${d.motivo})`);
+  sheets.registrarRespuesta(
+    EMPRESA.empresaNombre,
+    d.telefono,
+    d.nombre || '',
+    `[BAJA SOLICITADA — ${d.motivo}] ${d.textoOriginal || ''}`,
+    'no_contactar'
+  ).catch(function () {});
+};
+
 let chatbotIniciado = false;
 
 // Auto-iniciar WhatsApp al arrancar
@@ -173,11 +186,32 @@ app.post('/api/conectar', async (req, res) => {
         info: await whatsappService.getInfoSesion()
       });
     }
-    await whatsappService.initialize();
+
+    // v4: el servicio entra en "modo pánico" ante 403/429 o fallos
+    // persistentes y deja de reintentar solo. Salir de ahí es una
+    // decisión manual y consciente: reconectar en frío un número que
+    // WhatsApp acaba de restringir es lo que lo convierte en baneo.
+    const forzar = req.query.forzar === '1' || req.body?.forzar === true;
+
+    if (whatsappService.bloqueado && !forzar) {
+      return res.status(409).json({
+        exito: false,
+        bloqueado: true,
+        mensaje: `Bloqueado por anti-baneo: ${whatsappService.motivoBloqueo}`,
+        instruccion: 'Revisa el número en el celular. Si ya está bien, reintenta con POST /api/conectar?forzar=1',
+        salud: whatsappService.estadoSalud()
+      });
+    }
+
+    if (forzar && whatsappService.bloqueado) {
+      console.log(`⚠️  Reconexión FORZADA. Motivo del bloqueo era: ${whatsappService.motivoBloqueo}`);
+    }
+
+    await whatsappService.initialize(forzar);
     setTimeout(async () => {
       res.json({
         exito: true,
-        mensaje: 'Iniciando conexión...',
+        mensaje: forzar ? 'Reconexión forzada iniciada...' : 'Iniciando conexión...',
         info: await whatsappService.getInfoSesion()
       });
     }, 2000);
@@ -191,10 +225,88 @@ app.get('/api/estado', async (req, res) => {
     res.json({
       conectado: whatsappService.isConnected(),
       info: await whatsappService.getInfoSesion(),
+      // Defensivo: si el servicio desplegado todavía es viejo, no tumbar
+      // el panel entero por esto.
+      salud: typeof whatsappService.estadoSalud === 'function' ? whatsappService.estadoSalud() : null,
       estadisticasEnvio: envioMasivoService.getEstadisticas(),
       progreso: envioMasivoService.getProgreso(),
       chatbot: chatbot.getEstadisticas()
     });
+  } catch (error) {
+    res.status(500).json({ exito: false, mensaje: error.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════
+// SALUD ANTI-BANEO (v4)
+// ═══════════════════════════════════════════════════════════
+
+app.get('/api/salud', (req, res) => {
+  try {
+    if (typeof whatsappService.estadoSalud !== 'function') {
+      return res.status(501).json({ exito: false, mensaje: 'El servicio de WhatsApp desplegado no es v3.1+' });
+    }
+    res.json({ exito: true, ...whatsappService.estadoSalud() });
+  } catch (error) {
+    res.status(500).json({ exito: false, mensaje: error.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════
+// LISTA NO CONTACTAR (v4)
+//
+// La lista la llena el chatbot solo cuando el titular pide la baja.
+// Estos endpoints existen para que no sea una caja negra: poder ver
+// a quién dio de baja, darlo de baja a mano, o reactivar a alguien
+// que se arrepintió.
+// ═══════════════════════════════════════════════════════════
+
+app.get('/api/no-contactar', (req, res) => {
+  try {
+    if (typeof whatsappService.getNoContactar !== 'function') {
+      return res.status(501).json({ exito: false, mensaje: 'El servicio de WhatsApp desplegado no es v3.1+' });
+    }
+    const lista = whatsappService.getNoContactar();
+    // Más recientes primero
+    lista.sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
+    res.json({ exito: true, total: lista.length, lista });
+  } catch (error) {
+    res.status(500).json({ exito: false, mensaje: error.message });
+  }
+});
+
+app.post('/api/no-contactar', (req, res) => {
+  try {
+    const { telefono, motivo } = req.body || {};
+    if (!telefono) {
+      return res.status(400).json({ exito: false, mensaje: 'Falta el teléfono' });
+    }
+    const ok = whatsappService.agregarNoContactar(telefono, motivo || 'alta manual desde el panel');
+    if (!ok) {
+      return res.status(400).json({ exito: false, mensaje: 'Teléfono inválido (se esperan 10 dígitos)' });
+    }
+    res.json({ exito: true, mensaje: `${telefono} dado de baja`, total: whatsappService.getNoContactar().length });
+  } catch (error) {
+    res.status(500).json({ exito: false, mensaje: error.message });
+  }
+});
+
+app.delete('/api/no-contactar/:telefono', (req, res) => {
+  try {
+    const tel = req.params.telefono;
+    const ok = whatsappService.quitarNoContactar(tel);
+    if (!ok) {
+      return res.status(404).json({ exito: false, mensaje: `${tel} no está en la lista` });
+    }
+    // Limpiar también el estado terminal del chatbot, si no seguiría mudo
+    try {
+      const t10 = String(tel).replace(/\D/g, '').slice(-10);
+      const conv = chatbot.conversaciones.get(t10);
+      if (conv && conv.estado === chatbot.ESTADOS.NO_CONTACTAR) {
+        chatbot.conversaciones.delete(t10);
+      }
+    } catch (e) {}
+    res.json({ exito: true, mensaje: `${tel} reactivado`, total: whatsappService.getNoContactar().length });
   } catch (error) {
     res.status(500).json({ exito: false, mensaje: error.message });
   }
@@ -1323,6 +1435,8 @@ function getPanelHTML() {
       <!-- Conexión -->
       <div class="card" style="margin-bottom:16px;">
         <h2>📱 Conexión WhatsApp</h2>
+        <div id="alertaBaneo"></div>
+        <div id="saludBar" style="font-size:0.74rem; color:var(--muted); margin-bottom:8px;"></div>
         <div id="qrArea"></div>
         <div class="controls">
           <button class="btn btn-primary" onclick="conectar()">Conectar</button>
@@ -1371,10 +1485,14 @@ function getPanelHTML() {
           <input type="file" id="campImagen" accept="image/*">
         </div>
         <div class="grid grid-4" style="gap:6px; margin-bottom:10px;">
-          <div><label>Delay mín (s)</label><input type="number" id="cfgDelayMin" value="25" min="10"></div>
-          <div><label>Delay máx (s)</label><input type="number" id="cfgDelayMax" value="90" min="20"></div>
-          <div><label>Lote</label><input type="number" id="cfgLote" value="8" min="3" max="15"></div>
-          <div><label>Lím. diario</label><input type="number" id="cfgLimite" value="45" min="10"></div>
+          <div><label>Delay mín (s)</label><input type="number" id="cfgDelayMin" value="35" min="20"></div>
+          <div><label>Delay máx (s)</label><input type="number" id="cfgDelayMax" value="120" min="45"></div>
+          <div><label>Lote</label><input type="number" id="cfgLote" value="6" min="3" max="10"></div>
+          <div><label>Lím. diario</label><input type="number" id="cfgLimite" value="45" min="5" max="60"></div>
+        </div>
+        <div class="vars-help" style="margin-bottom:10px;">
+          🛡️ El servidor recorta cualquier valor fuera de rango. Usa <code>||</code> en la plantilla para rotar redacciones:
+          <code style="display:block; margin-top:4px; white-space:normal;">Hola {nombre}, le recuerdo su pago de {saldo}.||{nombre}, buen día. Recordatorio de su pago de {saldo}.</code>
         </div>
         <div class="controls">
           <button class="btn btn-green" id="btnIniciar" onclick="iniciarCampana()" disabled>▶ Iniciar</button>
@@ -1412,6 +1530,7 @@ function getPanelHTML() {
           <div class="tab active" onclick="switchTab('tabLive')">📡 Envío en Vivo</div>
           <div class="tab" onclick="switchTab('tabConv')">💬 Conversaciones</div>
           <div class="tab" onclick="switchTab('tabCola')">📋 Cola / Detalle</div>
+          <div class="tab" onclick="switchTab('tabBajas')">🚫 No Contactar</div>
         </div>
         
         <!-- TAB 1: Log en vivo -->
@@ -1449,6 +1568,29 @@ function getPanelHTML() {
             </table>
           </div>
         </div>
+
+        <!-- TAB 4: No Contactar (v4) -->
+        <div class="tab-content" id="tabBajas">
+          <p style="font-size:0.8rem; color:var(--muted); margin-bottom:10px;">
+            Números que pidieron la baja. El bot no les responde y las campañas los excluyen.
+            Un reporte de usuario pesa más que el volumen en el baneo de WhatsApp: esta lista es la defensa.
+          </p>
+          <div style="display:flex; gap:6px; margin-bottom:10px;">
+            <input type="text" id="bajaTel" placeholder="10 dígitos" style="flex:1;" maxlength="15">
+            <input type="text" id="bajaMotivo" placeholder="Motivo (opcional)" style="flex:2;">
+            <button class="btn btn-red btn-sm" onclick="agregarBaja()">🚫 Dar de baja</button>
+          </div>
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+            <span style="font-size:0.78rem; color:var(--muted);">Total: <b id="bajasTotal">0</b></span>
+            <button class="btn btn-outline btn-sm" onclick="cargarBajas()">🔄 Refrescar</button>
+          </div>
+          <div class="queue-scroll" id="bajasScroll">
+            <table class="queue-table">
+              <thead><tr><th>Teléfono</th><th>Motivo</th><th>Fecha</th><th></th></tr></thead>
+              <tbody id="bajasBody"><tr><td colspan="4" style="color:var(--muted);">Sin bajas registradas</td></tr></tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -1463,14 +1605,86 @@ let activeTab = 'tabLive';
 // ═══════════════════════════════════
 function switchTab(id) {
   activeTab = id;
+  const ids = ['tabLive','tabConv','tabCola','tabBajas'];
   document.querySelectorAll('.tab').forEach((t,i) => {
-    t.classList.toggle('active', ['tabLive','tabConv','tabCola'][i] === id);
+    t.classList.toggle('active', ids[i] === id);
   });
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
   document.getElementById(id).classList.add('active');
   
   if (id === 'tabConv') cargarConversaciones();
   if (id === 'tabCola') cargarCola();
+  if (id === 'tabBajas') cargarBajas();
+}
+
+// ═══════════════════════════════════
+// NO CONTACTAR (v4)
+// ═══════════════════════════════════
+
+// El motivo puede traer texto escrito por el cliente y se inyecta en
+// innerHTML. Sin escapar, un mensaje con "<img onerror=...>" ejecuta
+// script en tu panel.
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+async function cargarBajas() {
+  try {
+    const r = await fetch('/api/no-contactar');
+    const d = await r.json();
+    document.getElementById('bajasTotal').textContent = d.total || 0;
+    const body = document.getElementById('bajasBody');
+    if (!d.lista || !d.lista.length) {
+      body.innerHTML = '<tr><td colspan="4" style="color:var(--muted);">Sin bajas registradas</td></tr>';
+      return;
+    }
+    body.innerHTML = d.lista.map(function(b){
+      var f = new Date(b.fecha);
+      var fecha = isNaN(f) ? '—' : f.toLocaleDateString('es-MX') + ' ' + f.toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'});
+      return '<tr>' +
+        '<td>' + esc(b.telefono) + '</td>' +
+        '<td style="font-size:0.75rem; color:var(--muted);">' + esc(b.motivo || '—') + '</td>' +
+        '<td style="font-size:0.75rem;">' + fecha + '</td>' +
+        '<td><button class="btn btn-outline btn-sm" onclick="quitarBaja(\\'' + esc(b.telefono) + '\\')" title="Reactivar">↩</button></td>' +
+      '</tr>';
+    }).join('');
+  } catch(e) {
+    document.getElementById('bajasBody').innerHTML = '<tr><td colspan="4" style="color:var(--red);">Error: ' + esc(e.message) + '</td></tr>';
+  }
+}
+
+async function agregarBaja() {
+  const tel = (document.getElementById('bajaTel').value || '').trim();
+  const motivo = (document.getElementById('bajaMotivo').value || '').trim();
+  if (!tel) return alert('Escribe un teléfono');
+  if (!confirm('¿Dar de baja a ' + tel + '?\\n\\nEl bot dejará de responderle y las campañas lo van a excluir.')) return;
+  try {
+    const r = await fetch('/api/no-contactar', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ telefono: tel, motivo: motivo })
+    });
+    const d = await r.json();
+    if (!d.exito) return alert(d.mensaje);
+    document.getElementById('bajaTel').value = '';
+    document.getElementById('bajaMotivo').value = '';
+    cargarBajas();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function quitarBaja(tel) {
+  if (!confirm('¿Reactivar ' + tel + '?\\n\\nVolverá a recibir mensajes. Hazlo solo si el titular lo pidió.')) return;
+  try {
+    const r = await fetch('/api/no-contactar/' + encodeURIComponent(tel), { method: 'DELETE' });
+    const d = await r.json();
+    if (!d.exito) return alert(d.mensaje);
+    cargarBajas();
+  } catch(e) { alert('Error: ' + e.message); }
 }
 
 // ═══════════════════════════════════
@@ -1489,6 +1703,40 @@ async function cargarEstado() {
     } else {
       badge.className = 'conn-badge off';
       badge.textContent = '● Desconectado';
+    }
+
+    // v4: si el servicio entró en modo pánico, decirlo fuerte. Antes esto
+    // solo vivía en los logs y el panel se veía "normal" mientras el
+    // número estaba restringido.
+    // Contenedor propio: verificarQR() reescribe #qrArea cada 2s y borraría
+    // el banner.
+    const alerta = document.getElementById('alertaBaneo');
+    if (d.salud && d.salud.bloqueado) {
+      badge.className = 'conn-badge off';
+      badge.textContent = '● BLOQUEADO — anti-baneo';
+      alerta.innerHTML =
+        '<div style="background:#3a1414; border:1px solid var(--red); border-radius:8px; padding:12px; margin-bottom:10px;">' +
+          '<div style="color:var(--red); font-weight:700; margin-bottom:6px;">🛑 Reconexión detenida</div>' +
+          '<div style="font-size:0.78rem; line-height:1.5; margin-bottom:8px;">' + esc(d.salud.motivoBloqueo || '') + '</div>' +
+          '<div style="font-size:0.72rem; color:var(--muted); margin-bottom:8px;">Revisa el número en el celular antes de reintentar. Reconectar en frío un número restringido es lo que lo convierte en baneo definitivo.</div>' +
+          '<button class="btn btn-red btn-sm" onclick="forzarConexion()">⚠ Reintentar de todos modos</button>' +
+        '</div>';
+    } else {
+      alerta.innerHTML = '';
+    }
+
+    if (d.salud) {
+      const s = d.salud;
+      const pct = s.limiteDiario ? Math.round((s.enviadosHoy / s.limiteDiario) * 100) : 0;
+      const color = pct >= 90 ? 'var(--red)' : pct >= 70 ? 'var(--yellow)' : 'var(--muted)';
+      const sh = document.getElementById('saludBar');
+      if (sh) {
+        sh.innerHTML =
+          '<span style="color:' + color + ';">📊 ' + s.enviadosHoy + '/' + s.limiteDiario + ' hoy</span>' +
+          ' · <span style="color:' + (s.enVentanaHoraria ? 'var(--green)' : 'var(--yellow)') + ';">' +
+            (s.enVentanaHoraria ? '🕐 en ventana' : '🌙 fuera de ventana') + '</span>' +
+          ' · <span>📱 ' + s.registrosQRHoy + '/3 QR hoy</span>';
+      }
     }
     
     if (d.chatbot) {
@@ -1693,8 +1941,22 @@ async function cargarCola() {
 // CONEXIÓN
 // ═══════════════════════════════════
 async function conectar() {
-  await fetch('/api/conectar', { method:'POST' });
+  const r = await fetch('/api/conectar', { method:'POST' });
+  const d = await r.json();
+  // v4: 409 = el servicio está en modo pánico y se niega a reconectar solo.
+  if (r.status === 409 && d.bloqueado) {
+    cargarEstado(); // pinta el banner rojo con el motivo
+    return;
+  }
   setTimeout(verificarQR, 2000);
+}
+
+async function forzarConexion() {
+  if (!confirm('⚠ RECONEXIÓN FORZADA\\n\\nEl anti-baneo detuvo los reintentos por algo. Si el número sigue restringido del lado de WhatsApp, insistir puede volver la restricción permanente.\\n\\n¿Ya lo revisaste en el celular?')) return;
+  try {
+    await fetch('/api/conectar?forzar=1', { method:'POST' });
+    setTimeout(verificarQR, 2000);
+  } catch(e) { alert('Error: ' + e.message); }
 }
 async function verificarQR() {
   const r = await fetch('/api/qr');
