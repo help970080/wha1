@@ -50,7 +50,9 @@ class WhatsAppService {
     // ── Anti-baneo ──
     this.bloqueado = false;          // modo pánico: no reintenta solo
     this.motivoBloqueo = null;
-    this.registroAttempts = 0;       // QRs generados hoy
+    this.registroAttempts = 0;       // sesiones de QR mostradas hoy
+    this.maxRegistrosDia = 5;        // tope antes de pánico
+    this._qrSesionActiva = false;    // evita contar cada re-emisión de 'qr'
     this.enviadosHoy = 0;
     this.diaContador = this._hoy();
     this.limiteDiarioDuro = 60;      // backstop global de mensajes EN FRÍO
@@ -265,17 +267,15 @@ class WhatsAppService {
       const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
 
       // Si NO hay credenciales, esto es un registro nuevo (va a pedir QR).
-      const esRegistroNuevo = !state?.creds?.registered;
-      if (esRegistroNuevo) {
-        this.registroAttempts++;
-        this._guardarEstado();
-        console.log(`🆕 Registro nuevo (QR) — intento ${this.registroAttempts} de hoy`);
-        if (this.registroAttempts > 3) {
-          this.initializing = false;
-          this._panico('Más de 3 registros con QR en un día. WhatsApp lo lee como toma de cuenta.');
-          return false;
-        }
-      }
+      // v3.2: el contador de registros YA NO vive aquí.
+      //
+      // Antes se incrementaba con `!state.creds.registered`, o sea en cada
+      // initialize() sin credenciales. En Render el disco es efímero: cada
+      // redeploy borra auth_session/, así que TODO arranque contaba como
+      // registro nuevo y el guard se disparaba solo, sin que WhatsApp
+      // hubiera dicho nada. Ahora se cuenta en el evento 'qr' — que es lo
+      // que de verdad significa "hubo que escanear otra vez".
+      this._qrSesionActiva = false;
 
       const version = [2, 3000, 1039102240];
       console.log(`📌 Baileys version (manual): ${version.join('.')}`);
@@ -308,7 +308,24 @@ class WhatsAppService {
         const { connection, lastDisconnect, qr, isNewLogin } = update;
 
         if (qr) {
-          console.log('📱 Nuevo código QR generado - duración 60s');
+          // Baileys re-emite 'qr' cada ~20s mientras nadie escanea. Contar
+          // cada emisión inflaría el número en un solo intento legítimo.
+          // _qrSesionActiva hace que cuente UNA vez por ciclo de conexión.
+          if (!this._qrSesionActiva) {
+            this._qrSesionActiva = true;
+            this._rotarDia();
+            this.registroAttempts++;
+            this._guardarEstado();
+            console.log(`📱 QR mostrado — sesión ${this.registroAttempts}/${this.maxRegistrosDia} de hoy`);
+
+            if (this.registroAttempts > this.maxRegistrosDia) {
+              try { this.sock.ev.removeAllListeners(); } catch (e) {}
+              try { if (this.sock.ws) this.sock.ws.close(); } catch (e) {}
+              this._panico(`${this.registroAttempts} sesiones de QR en un día. WhatsApp lee el re-registro repetido como toma de cuenta. Si estás deployando seguido, el problema es que auth_session/ no sobrevive al redeploy.`);
+              return;
+            }
+          }
+
           try {
             this.qrCode = await qrcode.toDataURL(qr, { errorCorrectionLevel: 'M', margin: 2, width: 300 });
             this.qrTimestamp = Date.now();
@@ -320,6 +337,7 @@ class WhatsAppService {
         if (connection === 'open') {
           this.connected = true;
           this.reconnectAttempts = 0;
+          this._qrSesionActiva = false;
           this.qrCode = null;
           this.qrTimestamp = null;
           this.initializing = false;
@@ -354,8 +372,8 @@ class WhatsAppService {
             console.log('🚪 Sesion cerrada desde el celular. Se requiere QR nuevo.');
             this.limpiarAuthDir();
             this.qrCode = null;
-            if (this.registroAttempts >= 3) {
-              this._panico('Logout repetido: 3+ QR hoy.');
+            if (this.registroAttempts >= this.maxRegistrosDia) {
+              this._panico(`Logout repetido: ${this.registroAttempts} sesiones de QR hoy.`);
               return;
             }
             setTimeout(() => this.initialize(), 10000);
@@ -479,6 +497,7 @@ class WhatsAppService {
       limiteDiario: this.limiteDiarioDuro,
       restantesHoy: Math.max(0, this.limiteDiarioDuro - this.enviadosHoy),
       registrosQRHoy: this.registroAttempts,
+      maxRegistrosDia: this.maxRegistrosDia,
       enVentanaHoraria: this.enVentanaHoraria(),
       intentosReconexion: this.reconnectAttempts,
       numerosEnCache: this.onWhatsAppCache.size
