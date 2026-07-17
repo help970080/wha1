@@ -252,12 +252,22 @@ class WhatsAppService {
     try {
       console.log('🔄 Inicializando WhatsApp...');
 
+      // v3.3: cierre REAL del socket anterior.
+      //
+      // Antes: `if (this.sock.ws) this.sock.ws.close()`. En Baileys 6.7 eso
+      // no siempre termina la conexión: el socket viejo puede seguir vivo
+      // con las MISMAS credenciales. Cuando el nuevo levanta, los dos pelean
+      // por la misma sesión y WhatsApp manda `Stream Errored (conflict)`.
+      // sock.end() sí la cierra. El delay le da tiempo a soltar.
       if (this.sock) {
+        try { this.sock.ev.removeAllListeners(); } catch (e) {}
         try {
-          this.sock.ev.removeAllListeners();
-          if (this.sock.ws) this.sock.ws.close();
-        } catch (e) {}
+          this.sock.end(new Error('reinicializando'));
+        } catch (e) {
+          try { if (this.sock.ws) this.sock.ws.close(); } catch (e2) {}
+        }
         this.sock = null;
+        await new Promise(r => setTimeout(r, 1500));
       }
 
       if (!fs.existsSync(this.authDir)) {
@@ -367,6 +377,34 @@ class WhatsAppService {
           // baneo definitivo. Ahora se distingue de verdad.
           // ─────────────────────────────────────────────────────────
 
+          // v3.3: CONFLICT — otra sesión tomó la conexión.
+          //
+          // Baileys lo reporta como `401 | Stream Errored (conflict)`.
+          // El 401 hacía que cayera en el handler de logout de abajo, que
+          // BORRABA auth_session y forzaba QR nuevo. Eso es exactamente lo
+          // contrario de lo que hay que hacer: las credenciales están bien,
+          // lo que sobra es la otra sesión. Al borrarlas se perdía una
+          // sesión sana y arrancaba el ciclo de QRs.
+          //
+          // Tampoco se reconecta solo: reconectar es volver a pelear con
+          // la otra sesión y regenerar el conflict en bucle.
+          const esConflict = /conflict/i.test(errorMessage);
+          if (esConflict) {
+            console.log('');
+            console.log('⚠️  ═══════════════════════════════════════════════');
+            console.log('⚠️  CONFLICT: otra sesión tomó esta conexión.');
+            console.log('⚠️  Las credenciales NO se borran (están bien).');
+            console.log('⚠️  Causas típicas:');
+            console.log('⚠️    · Otra instancia del bot corriendo con la misma sesión');
+            console.log('⚠️    · El mismo número enlazado en WhatsApp Web en otro lado');
+            console.log('⚠️    · Un socket viejo que no murió del todo');
+            console.log('⚠️  Revisa que no haya otro proceso y reconecta manual.');
+            console.log('⚠️  ═══════════════════════════════════════════════');
+            console.log('');
+            this.reconnectAttempts = 0;
+            return;
+          }
+
           // 401 = logout REAL desde el celular. Único caso de wipe.
           if (statusCode === reason.loggedOut || statusCode === 401) {
             console.log('🚪 Sesion cerrada desde el celular. Se requiere QR nuevo.');
@@ -377,6 +415,23 @@ class WhatsAppService {
               return;
             }
             setTimeout(() => this.initialize(), 10000);
+            return;
+          }
+
+          // v3.3: QR expirado sin escanear. NO es problema de red.
+          //
+          // Baileys manda `408 | QR refs attempts ended` cuando agotó los
+          // refrescos del QR y nadie lo escaneó. Antes esto caía en el
+          // bucket de "red" y se reintentaba con backoff: cada reintento
+          // generaba un QR nuevo que tampoco iba a escanear nadie, quemando
+          // el contador de sesiones. Si nadie escaneó es porque no hay
+          // humano enfrente. Se detiene y se espera acción manual.
+          if (/qr refs attempts ended|qr refs/i.test(errorMessage)) {
+            console.log('⏰ El QR expiró sin que nadie lo escaneara.');
+            console.log('   No se reintenta solo (generaría QRs que nadie va a ver).');
+            console.log('   Cuando estés listo: botón Conectar en el panel.');
+            this.qrCode = null;
+            this.reconnectAttempts = 0;
             return;
           }
 
@@ -867,7 +922,9 @@ class WhatsAppService {
       if (this.sock) {
         try { this.sock.ev.removeAllListeners(); } catch (e) {}
         try { await this.sock.logout(); } catch (e) {}
-        try { if (this.sock.ws) this.sock.ws.close(); } catch (e) {}
+        try { this.sock.end(new Error('cierre manual')); } catch (e) {
+          try { if (this.sock.ws) this.sock.ws.close(); } catch (e2) {}
+        }
         this.sock = null;
       }
       this.connected = false;
